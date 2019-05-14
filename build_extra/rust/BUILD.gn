@@ -1341,7 +1341,7 @@ rust_crate("time") {
 
 rust_crate("tokio") {
   edition = "2015"
-  source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/tokio-0.1.19/src/lib.rs"
+  source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/tokio-0.1.20/src/lib.rs"
   features = [
     "bytes",
     "codec",
@@ -1588,7 +1588,7 @@ rust_crate("tokio_threadpool") {
 
 rust_crate("tokio_timer") {
   edition = "2015"
-  source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/tokio-timer-0.2.10/src/lib.rs"
+  source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/tokio-timer-0.2.11/src/lib.rs"
   extern = [
     ":crossbeam_utils",
     ":futures",
@@ -2044,7 +2044,6 @@ if (is_win) {
     source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/winapi-0.3.7/src/lib.rs"
     features = [
       "consoleapi",
-      "dbghelp",
       "errhandlingapi",
       "fileapi",
       "handleapi",
@@ -2122,7 +2121,6 @@ if (is_win) {
       "advapi32.lib",
       "cfgmgr32.lib",
       "credui.lib",
-      "dbghelp.lib",
       "fwpuclnt.lib",
       "gdi32.lib",
       "kernel32.lib",
