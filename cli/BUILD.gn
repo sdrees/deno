@@ -27,6 +27,7 @@ main_extern = [
   "$rust_build:remove_dir_all",
   "$rust_build:ring",
   "$rust_build:rustyline",
+  "$rust_build:serde_derive",
   "$rust_build:serde_json",
   "$rust_build:source_map_mappings",
   "$rust_build:tempfile",
