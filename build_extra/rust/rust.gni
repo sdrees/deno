@@ -264,7 +264,7 @@ template("rust_crate") {
     
     if (defined(invoker.extern_proc_macro)) {
       foreach(e, invoker.extern_proc_macro) {
-        filename = "$out_dir/$e${shared_library_suffix}"
+        filename = "$out_dir/lib$e${shared_library_suffix}"
         args += [
           "--extern",
           e + "=" + rebase_path(filename, root_build_dir)
