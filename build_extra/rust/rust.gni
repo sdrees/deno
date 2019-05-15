@@ -13,15 +13,18 @@ declare_args() {
 
 if (is_linux) {
   executable_suffix = ""
+  shared_library_prefix = "lib"
   shared_library_suffix = ".so"
 } else if (is_mac) {
   executable_suffix = ""
+  shared_library_prefix = "lib"
   shared_library_suffix = ".dylib"
 } else if (is_win) {
   executable_suffix = ".exe"
+  shared_library_prefix = ""
   shared_library_suffix = ".dll"
 } else {
-  assert(false && "Unsupported platform")
+  assert(false, "Unsupported platform")
 }
 
 # To simplify transitive dependency management with gn, we build all rust
@@ -153,7 +156,7 @@ template("rust_crate") {
     rustc_output = "$out_dir/$crate_name$crate_suffix.o"
     emit_type = "obj"
   } else if (crate_type == "proc-macro") {
-    rustc_output = "$out_dir/lib$crate_name$crate_suffix${shared_library_suffix}"
+    rustc_output = "$out_dir/$shared_library_prefix$crate_name$crate_suffix$shared_library_suffix"
     emit_type = "link"
   } else if (crate_type == "rlib") {
     rustc_output = "$out_dir/lib$crate_name$crate_suffix.rlib"
@@ -261,15 +264,15 @@ template("rust_crate") {
       sources += [ extern.rlib ]
       deps += [ extern.label ]
     }
-    
+
     if (defined(invoker.extern_proc_macro)) {
       foreach(e, invoker.extern_proc_macro) {
-        filename = "$out_dir/lib$e${shared_library_suffix}"
+        filename = "$out_dir/$shared_library_prefix$e${shared_library_suffix}"
         args += [
           "--extern",
-          e + "=" + rebase_path(filename, root_build_dir)
+          e + "=" + rebase_path(filename, root_build_dir),
         ]
-        deps += ["//build_extra/rust/:" + e]
+        deps += [ "//build_extra/rust/:" + e ]
       }
     }
   }

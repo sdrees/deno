@@ -57,8 +57,8 @@ use std::env;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct Point {
-    x: i32,
-    y: i32,
+  x: i32,
+  y: i32,
 }
 
 static LOGGER: Logger = Logger;
