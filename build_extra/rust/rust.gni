@@ -262,6 +262,8 @@ template("rust_crate") {
           "--extern",
           e + "=" + rebase_path(filename, root_build_dir)
         ]
+        print(deps)
+        deps += ["//build_extra/rust/:" + e]
       }
     }
   }
