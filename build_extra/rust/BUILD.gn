@@ -1225,6 +1225,7 @@ rust_crate("serde_derive") {
   edition = "2015"
   source_root = "$cargo_home/registry/src/github.com-1ecc6299db9ec823/serde_derive-1.0.91/src/lib.rs"
   features = [ "default" ]
+  crate_type = "proc-macro"
   extern = [
     ":proc_macro2",
     ":quote",

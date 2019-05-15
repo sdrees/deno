@@ -27,7 +27,7 @@ main_extern = [
   "$rust_build:remove_dir_all",
   "$rust_build:ring",
   "$rust_build:rustyline",
-  "$rust_build:serde_derive",
+  "$rust_build:serde",
   "$rust_build:serde_json",
   "$rust_build:source_map_mappings",
   "$rust_build:tempfile",
@@ -155,6 +155,7 @@ deno_cargo_info = exec_script(
 rust_executable("deno") {
   source_root = "main.rs"
   extern = main_extern
+  extern_proc_macro = ["serde_derive"]
   deps = [
     ":deno_deps",
   ]

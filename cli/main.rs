@@ -5,6 +5,9 @@ extern crate lazy_static;
 extern crate log;
 #[macro_use]
 extern crate futures;
+extern crate serde;
+#[macro_use]
+extern crate serde_derive;
 #[macro_use]
 extern crate serde_json;
 extern crate clap;
@@ -51,6 +54,12 @@ use futures::lazy;
 use futures::Future;
 use log::{LevelFilter, Metadata, Record};
 use std::env;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Point {
+    x: i32,
+    y: i32,
+}
 
 static LOGGER: Logger = Logger;
 

@@ -145,6 +145,9 @@ template("rust_crate") {
   if (crate_type == "bin") {
     rustc_output = "$out_dir/$crate_name$crate_suffix.o"
     emit_type = "obj"
+  } else if (crate_type == "proc-macro") {
+    rustc_output = "$out_dir/lib$crate_name$crate_suffix.dll"
+    emit_type = "link"
   } else if (crate_type == "rlib") {
     rustc_output = "$out_dir/lib$crate_name$crate_suffix.rlib"
     emit_type = "link"
@@ -251,6 +254,30 @@ template("rust_crate") {
       sources += [ extern.rlib ]
       deps += [ extern.label ]
     }
+    
+    if (defined(invoker.extern_proc_macro)) {
+      foreach(e, invoker.extern_proc_macro) {
+        filename = "$out_dir/$e.dll"
+        args += [
+          "--extern",
+          e + "=" + rebase_path(filename, root_build_dir)
+        ]
+      }
+    }
+  }
+}
+
+template("rust_lib") {
+  rust_crate(target_name) {
+    crate_type = "rlib"
+    forward_variables_from(invoker, "*")
+  }
+}
+
+template("rust_proc_macro") {
+  rust_crate(target_name) {
+    crate_type = "proc-macro"
+    forward_variables_from(invoker, "*")
   }
 }
 
