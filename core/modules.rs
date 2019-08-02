@@ -6,17 +6,19 @@
 // small and simple for users who do not use modules or if they do can load them
 // synchronously. The isolate.rs module should never depend on this module.
 
+use crate::any_error::ErrBox;
 use crate::isolate::Isolate;
-use crate::js_errors::JSError;
 use crate::libdeno::deno_mod;
+use crate::module_specifier::ModuleSpecifier;
 use futures::Async;
 use futures::Future;
 use futures::Poll;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::error::Error;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Represent result of fetching the source code of a module.
 /// Contains both module name and code.
@@ -31,48 +33,42 @@ pub struct SourceCodeInfo {
   pub code: String,
 }
 
-pub type SourceCodeInfoFuture<E> =
-  dyn Future<Item = SourceCodeInfo, Error = E> + Send;
+pub type SourceCodeInfoFuture =
+  dyn Future<Item = SourceCodeInfo, Error = ErrBox> + Send;
 
-pub trait Loader {
-  type Error: std::error::Error + 'static;
-
+pub trait Loader: Send + Sync {
   /// Returns an absolute URL.
   /// When implementing an spec-complaint VM, this should be exactly the
   /// algorithm described here:
   /// https://html.spec.whatwg.org/multipage/webappapis.html#resolve-a-module-specifier
-  fn resolve(specifier: &str, referrer: &str) -> Result<String, Self::Error>;
+  fn resolve(
+    &self,
+    specifier: &str,
+    referrer: &str,
+    is_root: bool,
+  ) -> Result<ModuleSpecifier, ErrBox>;
 
-  /// Given an absolute url, load its source code.
-  fn load(&mut self, url: &str) -> Box<SourceCodeInfoFuture<Self::Error>>;
-
-  fn isolate_and_modules<'a: 'b + 'c, 'b, 'c>(
-    &'a mut self,
-  ) -> (&'b mut Isolate, &'c mut Modules);
-
-  fn isolate<'a: 'b, 'b>(&'a mut self) -> &'b mut Isolate {
-    let (isolate, _) = self.isolate_and_modules();
-    isolate
-  }
-
-  fn modules<'a: 'b, 'b>(&'a mut self) -> &'b mut Modules {
-    let (_, modules) = self.isolate_and_modules();
-    modules
-  }
+  /// Given ModuleSpecifier, load its source code.
+  fn load(
+    &self,
+    module_specifier: &ModuleSpecifier,
+  ) -> Box<SourceCodeInfoFuture>;
 }
 
-struct PendingLoad<E: Error> {
+struct PendingLoad {
   url: String,
   is_root: bool,
-  source_code_info_future: Box<SourceCodeInfoFuture<E>>,
+  source_code_info_future: Box<SourceCodeInfoFuture>,
 }
 
 /// This future is used to implement parallel async module loading without
 /// complicating the Isolate API. Note that RecursiveLoad will take ownership of
 /// an Isolate during load.
 pub struct RecursiveLoad<L: Loader> {
-  loader: Option<L>,
-  pending: Vec<PendingLoad<L::Error>>,
+  loader: L,
+  isolate: Arc<Mutex<Isolate>>,
+  modules: Arc<Mutex<Modules>>,
+  pending: Vec<PendingLoad>,
   is_pending: HashSet<String>,
   phantom: PhantomData<L>,
   // TODO(ry) The following can all be combined into a single enum State type.
@@ -83,9 +79,16 @@ pub struct RecursiveLoad<L: Loader> {
 
 impl<L: Loader> RecursiveLoad<L> {
   /// Starts a new parallel load of the given URL.
-  pub fn new(url: &str, loader: L) -> Self {
+  pub fn new(
+    url: &str,
+    loader: L,
+    isolate: Arc<Mutex<Isolate>>,
+    modules: Arc<Mutex<Modules>>,
+  ) -> Self {
     Self {
-      loader: Some(loader),
+      loader,
+      isolate,
+      modules,
       root: None,
       root_specifier: Some(url.to_string()),
       root_id: None,
@@ -95,73 +98,57 @@ impl<L: Loader> RecursiveLoad<L> {
     }
   }
 
-  fn take_loader(&mut self) -> L {
-    self.loader.take().unwrap()
-  }
-
   fn add(
     &mut self,
     specifier: &str,
     referrer: &str,
     parent_id: Option<deno_mod>,
-  ) -> Result<String, L::Error> {
-    let url = L::resolve(specifier, referrer)?;
+  ) -> Result<String, ErrBox> {
+    let is_root = parent_id.is_none();
+    let module_specifier = self.loader.resolve(specifier, referrer, is_root)?;
+    let module_name = module_specifier.to_string();
 
-    let is_root = if let Some(parent_id) = parent_id {
-      let loader = self.loader.as_mut().unwrap();
-      let modules = loader.modules();
-      modules.add_child(parent_id, &url);
-      false
-    } else {
-      true
-    };
-
-    {
-      let loader = self.loader.as_mut().unwrap();
-      let modules = loader.modules();
-      // #B We only add modules that have not yet been resolved for RecursiveLoad.
-      // Only short circuit after add_child().
-      // This impacts possible conditions in #A.
-      if modules.is_registered(&url) {
-        return Ok(url);
+    if !is_root {
+      {
+        let mut m = self.modules.lock().unwrap();
+        m.add_child(parent_id.unwrap(), &module_name);
       }
     }
 
-    if !self.is_pending.contains(&url) {
-      self.is_pending.insert(url.clone());
-      let source_code_info_future = {
-        let loader = self.loader.as_mut().unwrap();
-        loader.load(&url)
-      };
+    {
+      // #B We only add modules that have not yet been resolved for RecursiveLoad.
+      // Only short circuit after add_child().
+      // This impacts possible conditions in #A.
+      let modules = self.modules.lock().unwrap();
+      if modules.is_registered(&module_name) {
+        return Ok(module_name);
+      }
+    }
+
+    if !self.is_pending.contains(&module_name) {
+      self.is_pending.insert(module_name.to_string());
+      let source_code_info_future = { self.loader.load(&module_specifier) };
       self.pending.push(PendingLoad {
-        url: url.clone(),
+        url: module_name.to_string(),
         source_code_info_future,
         is_root,
       });
     }
 
-    Ok(url)
+    Ok(module_name)
   }
 }
 
-// TODO(ry) This is basically the same thing as RustOrJsError. They should be
-// combined into one type.
-#[derive(Debug, PartialEq)]
-pub enum JSErrorOr<E> {
-  JSError(JSError),
-  Other(E),
-}
-
 impl<L: Loader> Future for RecursiveLoad<L> {
-  type Item = (deno_mod, L);
-  type Error = (JSErrorOr<L::Error>, L);
+  type Item = deno_mod;
+  type Error = ErrBox;
 
   fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
     if self.root.is_none() && self.root_specifier.is_some() {
       let s = self.root_specifier.take().unwrap();
       match self.add(&s, ".", None) {
         Err(err) => {
-          return Err((JSErrorOr::Other(err), self.take_loader()));
+          return Err(err);
         }
         Ok(root) => {
           self.root = Some(root);
@@ -176,7 +163,7 @@ impl<L: Loader> Future for RecursiveLoad<L> {
       let pending = &mut self.pending[i];
       match pending.source_code_info_future.poll() {
         Err(err) => {
-          return Err((JSErrorOr::Other(err), self.take_loader()));
+          return Err(err);
         }
         Ok(Async::NotReady) => {
           i += 1;
@@ -195,8 +182,7 @@ impl<L: Loader> Future for RecursiveLoad<L> {
           //   2b. The module with resolved module name has not yet been registerd
           //     -> register & alias
           let is_module_registered = {
-            let loader = self.loader.as_mut().unwrap();
-            let modules = loader.modules();
+            let modules = self.modules.lock().unwrap();
             modules.is_registered(&source_code_info.module_name)
           };
 
@@ -205,19 +191,15 @@ impl<L: Loader> Future for RecursiveLoad<L> {
           if !is_module_registered {
             let module_name = &source_code_info.module_name;
 
-            let result = {
-              let loader = self.loader.as_mut().unwrap();
-              let isolate = loader.isolate();
+            let mod_id = {
+              let isolate = self.isolate.lock().unwrap();
               isolate.mod_new(
                 completed.is_root,
                 module_name,
                 &source_code_info.code,
               )
-            };
-            if let Err(err) = result {
-              return Err((JSErrorOr::JSError(err), self.take_loader()));
-            }
-            let mod_id = result.unwrap();
+            }?;
+
             if completed.is_root {
               assert!(self.root_id.is_none());
               self.root_id = Some(mod_id);
@@ -225,8 +207,7 @@ impl<L: Loader> Future for RecursiveLoad<L> {
 
             // Register new module.
             {
-              let loader = self.loader.as_mut().unwrap();
-              let modules = loader.modules();
+              let mut modules = self.modules.lock().unwrap();
               modules.register(mod_id, module_name);
               // If necessary, register the alias.
               if need_alias {
@@ -237,19 +218,15 @@ impl<L: Loader> Future for RecursiveLoad<L> {
 
             // Now we must iterate over all imports of the module and load them.
             let imports = {
-              let loader = self.loader.as_mut().unwrap();
-              let isolate = loader.isolate();
+              let isolate = self.isolate.lock().unwrap();
               isolate.mod_get_imports(mod_id)
             };
             let referrer = module_name;
             for specifier in imports {
-              self
-                .add(&specifier, referrer, Some(mod_id))
-                .map_err(|e| (JSErrorOr::Other(e), self.take_loader()))?;
+              self.add(&specifier, referrer, Some(mod_id))?;
             }
           } else if need_alias {
-            let loader = self.loader.as_mut().unwrap();
-            let modules = loader.modules();
+            let mut modules = self.modules.lock().unwrap();
             modules.alias(&completed.url, &source_code_info.module_name);
           }
         }
@@ -261,30 +238,26 @@ impl<L: Loader> Future for RecursiveLoad<L> {
     }
 
     let root_id = self.root_id.unwrap();
-    let mut loader = self.take_loader();
-    let (isolate, modules) = loader.isolate_and_modules();
-    let result = {
-      let mut resolve_cb =
-        |specifier: &str, referrer_id: deno_mod| -> deno_mod {
-          let referrer = modules.get_name(referrer_id).unwrap();
-          match L::resolve(specifier, &referrer) {
-            Ok(url) => match modules.get_id(&url) {
-              Some(id) => id,
-              None => 0,
-            },
-            // We should have already resolved and loaded this module, so
-            // resolve() will not fail this time.
-            Err(_err) => unreachable!(),
-          }
-        };
 
-      isolate.mod_instantiate(root_id, &mut resolve_cb)
+    let mut resolve_cb = |specifier: &str, referrer_id: deno_mod| -> deno_mod {
+      let modules = self.modules.lock().unwrap();
+      let referrer = modules.get_name(referrer_id).unwrap();
+      // this callback is only called for non-root modules
+      match self.loader.resolve(specifier, &referrer, false) {
+        Ok(specifier) => match modules.get_id(&specifier.to_string()) {
+          Some(id) => id,
+          None => 0,
+        },
+        // We should have already resolved and loaded this module, so
+        // resolve() will not fail this time.
+        Err(_err) => unreachable!(),
+      }
     };
 
-    match result {
-      Err(err) => Err((JSErrorOr::JSError(err), loader)),
-      Ok(()) => Ok(Async::Ready((root_id, loader))),
-    }
+    let mut isolate = self.isolate.lock().unwrap();
+    isolate
+      .mod_instantiate(root_id, &mut resolve_cb)
+      .map(|_| Async::Ready(root_id))
   }
 }
 
@@ -411,7 +384,8 @@ impl Modules {
         if !i.has_child(&child_name) {
           i.children.push(child_name.to_string());
         }
-      }).is_some()
+      })
+      .is_some()
   }
 
   pub fn register(&mut self, id: deno_mod, name: &str) {
@@ -545,12 +519,13 @@ mod tests {
   use super::*;
   use crate::isolate::js_check;
   use crate::isolate::tests::*;
+  use std::error::Error;
   use std::fmt;
 
   struct MockLoader {
-    pub loads: Vec<String>,
-    pub isolate: Isolate,
-    pub modules: Modules,
+    pub loads: Arc<Mutex<Vec<String>>>,
+    pub isolate: Arc<Mutex<Isolate>>,
+    pub modules: Arc<Mutex<Modules>>,
   }
 
   impl MockLoader {
@@ -558,31 +533,34 @@ mod tests {
       let modules = Modules::new();
       let (isolate, _dispatch_count) = setup(Mode::AsyncImmediate);
       Self {
-        loads: Vec::new(),
-        isolate,
-        modules,
+        loads: Arc::new(Mutex::new(Vec::new())),
+        isolate: Arc::new(Mutex::new(isolate)),
+        modules: Arc::new(Mutex::new(modules)),
       }
     }
   }
 
   fn mock_source_code(url: &str) -> Option<(&'static str, &'static str)> {
     // (code, real_module_name)
-    match url {
-      "a.js" => Some((A_SRC, "a.js")),
-      "b.js" => Some((B_SRC, "b.js")),
-      "c.js" => Some((C_SRC, "c.js")),
-      "d.js" => Some((D_SRC, "d.js")),
-      "circular1.js" => Some((CIRCULAR1_SRC, "circular1.js")),
-      "circular2.js" => Some((CIRCULAR2_SRC, "circular2.js")),
-      "circular3.js" => Some((CIRCULAR3_SRC, "circular3.js")),
-      "redirect1.js" => Some((REDIRECT1_SRC, "redirect1.js")),
-      // pretend redirect
-      "./redirect2.js" => Some((REDIRECT2_SRC, "./dir/redirect2.js")),
-      "./dir/redirect3.js" => Some((REDIRECT3_SRC, "./redirect3.js")),
-      "slow.js" => Some((SLOW_SRC, "slow.js")),
-      "never_ready.js" => Some(("should never be loaded", "never_ready.js")),
-      "main.js" => Some((MAIN_SRC, "main.js")),
-      "bad_import.js" => Some((BAD_IMPORT_SRC, "bad_import.js")),
+    let spec: Vec<&str> = url.split("file://").collect();
+    match spec[1] {
+      "/a.js" => Some((A_SRC, "file:///a.js")),
+      "/b.js" => Some((B_SRC, "file:///b.js")),
+      "/c.js" => Some((C_SRC, "file:///c.js")),
+      "/d.js" => Some((D_SRC, "file:///d.js")),
+      "/circular1.js" => Some((CIRCULAR1_SRC, "file:///circular1.js")),
+      "/circular2.js" => Some((CIRCULAR2_SRC, "file:///circular2.js")),
+      "/circular3.js" => Some((CIRCULAR3_SRC, "file:///circular3.js")),
+      "/redirect1.js" => Some((REDIRECT1_SRC, "file:///redirect1.js")),
+      // pretend redirect - real module name is different than one requested
+      "/redirect2.js" => Some((REDIRECT2_SRC, "file:///dir/redirect2.js")),
+      "/dir/redirect3.js" => Some((REDIRECT3_SRC, "file:///redirect3.js")),
+      "/slow.js" => Some((SLOW_SRC, "file:///slow.js")),
+      "/never_ready.js" => {
+        Some(("should never be loaded", "file:///never_ready.js"))
+      }
+      "/main.js" => Some((MAIN_SRC, "file:///main.js")),
+      "/bad_import.js" => Some((BAD_IMPORT_SRC, "file:///bad_import.js")),
       _ => None,
     }
   }
@@ -600,7 +578,7 @@ mod tests {
   }
 
   impl Error for MockError {
-    fn cause(&self) -> Option<&Error> {
+    fn cause(&self) -> Option<&dyn Error> {
       unimplemented!()
     }
   }
@@ -612,12 +590,12 @@ mod tests {
 
   impl Future for DelayedSourceCodeFuture {
     type Item = SourceCodeInfo;
-    type Error = MockError;
+    type Error = ErrBox;
 
-    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+    fn poll(&mut self) -> Poll<Self::Item, ErrBox> {
       self.counter += 1;
-      if self.url == "never_ready.js"
-        || (self.url == "slow.js" && self.counter < 2)
+      if self.url == "file:///never_ready.js"
+        || (self.url == "file:///slow.js" && self.counter < 2)
       {
         return Ok(Async::NotReady);
       }
@@ -626,111 +604,131 @@ mod tests {
           code: src.0.to_owned(),
           module_name: src.1.to_owned(),
         })),
-        None => Err(MockError::LoadErr),
+        None => Err(MockError::LoadErr.into()),
       }
     }
   }
 
   impl Loader for MockLoader {
-    type Error = MockError;
+    fn resolve(
+      &self,
+      specifier: &str,
+      referrer: &str,
+      _is_root: bool,
+    ) -> Result<ModuleSpecifier, ErrBox> {
+      let referrer = if referrer == "." {
+        "file:///"
+      } else {
+        referrer
+      };
 
-    fn resolve(specifier: &str, referrer: &str) -> Result<String, Self::Error> {
       eprintln!(">> RESOLVING, S: {}, R: {}", specifier, referrer);
+
       let output_specifier =
-        if specifier.starts_with("./") && referrer.starts_with("./") {
-          // Special fake path resolving logic (for redirect test)
-          // if both started with "./"
-          eprintln!(">> SPECIAL!");
-          let prefix = {
-            let mut iter = referrer.rsplitn(2, '/');
-            let _ = iter.next();
-            iter.next().unwrap()
-          };
-          let suffix = {
-            let mut iter = specifier.splitn(2, '/');
-            let _ = iter.next();
-            iter.next().unwrap()
-          };
-          format!("{}/{}", &prefix, &suffix)
-        } else {
-          specifier.to_owned()
+        match ModuleSpecifier::resolve_import(specifier, referrer) {
+          Ok(specifier) => specifier,
+          Err(..) => return Err(MockError::ResolveErr.into()),
         };
 
-      if mock_source_code(&output_specifier).is_some() {
+      if mock_source_code(&output_specifier.to_string()).is_some() {
         Ok(output_specifier)
       } else {
-        Err(MockError::ResolveErr)
+        Err(MockError::ResolveErr.into())
       }
     }
 
-    fn load(&mut self, url: &str) -> Box<SourceCodeInfoFuture<Self::Error>> {
-      self.loads.push(url.to_string());
-      let url = url.to_string();
+    fn load(
+      &self,
+      module_specifier: &ModuleSpecifier,
+    ) -> Box<SourceCodeInfoFuture> {
+      let mut loads = self.loads.lock().unwrap();
+      loads.push(module_specifier.to_string());
+      let url = module_specifier.to_string();
       Box::new(DelayedSourceCodeFuture { url, counter: 0 })
-    }
-
-    fn isolate_and_modules<'a: 'b + 'c, 'b, 'c>(
-      &'a mut self,
-    ) -> (&'b mut Isolate, &'c mut Modules) {
-      (&mut self.isolate, &mut self.modules)
     }
   }
 
   const A_SRC: &str = r#"
-    import { b } from "b.js";
-    import { c } from "c.js";
+    import { b } from "/b.js";
+    import { c } from "/c.js";
     if (b() != 'b') throw Error();
     if (c() != 'c') throw Error();
     if (!import.meta.main) throw Error();
-    if (import.meta.url != 'a.js') throw Error();
+    if (import.meta.url != 'file:///a.js') throw Error();
   "#;
 
   const B_SRC: &str = r#"
-    import { c } from "c.js";
+    import { c } from "/c.js";
     if (c() != 'c') throw Error();
     export function b() { return 'b'; }
     if (import.meta.main) throw Error();
-    if (import.meta.url != 'b.js') throw Error();
+    if (import.meta.url != 'file:///b.js') throw Error();
   "#;
 
   const C_SRC: &str = r#"
-    import { d } from "d.js";
+    import { d } from "/d.js";
     export function c() { return 'c'; }
     if (d() != 'd') throw Error();
     if (import.meta.main) throw Error();
-    if (import.meta.url != 'c.js') throw Error();
+    if (import.meta.url != 'file:///c.js') throw Error();
   "#;
 
   const D_SRC: &str = r#"
     export function d() { return 'd'; }
     if (import.meta.main) throw Error();
-    if (import.meta.url != 'd.js') throw Error();
+    if (import.meta.url != 'file:///d.js') throw Error();
   "#;
 
   #[test]
   fn test_recursive_load() {
     let loader = MockLoader::new();
-    let mut recursive_load = RecursiveLoad::new("a.js", loader);
+    let modules = loader.modules.clone();
+    let modules_ = modules.clone();
+    let isolate = loader.isolate.clone();
+    let isolate_ = isolate.clone();
+    let loads = loader.loads.clone();
+    let mut recursive_load =
+      RecursiveLoad::new("/a.js", loader, isolate, modules);
 
     let result = recursive_load.poll();
     assert!(result.is_ok());
-    if let Async::Ready((a_id, mut loader)) = result.ok().unwrap() {
-      js_check(loader.isolate.mod_evaluate(a_id));
-      assert_eq!(loader.loads, vec!["a.js", "b.js", "c.js", "d.js"]);
+    if let Async::Ready(a_id) = result.ok().unwrap() {
+      let mut isolate = isolate_.lock().unwrap();
+      js_check(isolate.mod_evaluate(a_id));
 
-      let modules = &loader.modules;
+      let l = loads.lock().unwrap();
+      assert_eq!(
+        l.to_vec(),
+        vec![
+          "file:///a.js",
+          "file:///b.js",
+          "file:///c.js",
+          "file:///d.js"
+        ]
+      );
 
-      assert_eq!(modules.get_id("a.js"), Some(a_id));
-      let b_id = modules.get_id("b.js").unwrap();
-      let c_id = modules.get_id("c.js").unwrap();
-      let d_id = modules.get_id("d.js").unwrap();
+      let modules = modules_.lock().unwrap();
+
+      assert_eq!(modules.get_id("file:///a.js"), Some(a_id));
+      let b_id = modules.get_id("file:///b.js").unwrap();
+      let c_id = modules.get_id("file:///c.js").unwrap();
+      let d_id = modules.get_id("file:///d.js").unwrap();
 
       assert_eq!(
         modules.get_children(a_id),
-        Some(&vec!["b.js".to_string(), "c.js".to_string()])
+        Some(&vec![
+          "file:///b.js".to_string(),
+          "file:///c.js".to_string()
+        ])
       );
-      assert_eq!(modules.get_children(b_id), Some(&vec!["c.js".to_string()]));
-      assert_eq!(modules.get_children(c_id), Some(&vec!["d.js".to_string()]));
+      assert_eq!(
+        modules.get_children(b_id),
+        Some(&vec!["file:///c.js".to_string()])
+      );
+      assert_eq!(
+        modules.get_children(c_id),
+        Some(&vec!["file:///d.js".to_string()])
+      );
       assert_eq!(modules.get_children(d_id), Some(&vec![]));
     } else {
       unreachable!();
@@ -738,57 +736,70 @@ mod tests {
   }
 
   const CIRCULAR1_SRC: &str = r#"
-    import "circular2.js";
+    import "/circular2.js";
     Deno.core.print("circular1");
   "#;
 
   const CIRCULAR2_SRC: &str = r#"
-    import "circular3.js";
+    import "/circular3.js";
     Deno.core.print("circular2");
   "#;
 
   const CIRCULAR3_SRC: &str = r#"
-    import "circular1.js";
-    import "circular2.js";
+    import "/circular1.js";
+    import "/circular2.js";
     Deno.core.print("circular3");
   "#;
 
   #[test]
   fn test_circular_load() {
     let loader = MockLoader::new();
-    let mut recursive_load = RecursiveLoad::new("circular1.js", loader);
+    let isolate = loader.isolate.clone();
+    let isolate_ = isolate.clone();
+    let modules = loader.modules.clone();
+    let modules_ = modules.clone();
+    let loads = loader.loads.clone();
+    let mut recursive_load =
+      RecursiveLoad::new("/circular1.js", loader, isolate, modules);
 
     let result = recursive_load.poll();
     assert!(result.is_ok());
-    if let Async::Ready((circular1_id, mut loader)) = result.ok().unwrap() {
-      js_check(loader.isolate.mod_evaluate(circular1_id));
+    if let Async::Ready(circular1_id) = result.ok().unwrap() {
+      let mut isolate = isolate_.lock().unwrap();
+      js_check(isolate.mod_evaluate(circular1_id));
+
+      let l = loads.lock().unwrap();
       assert_eq!(
-        loader.loads,
-        vec!["circular1.js", "circular2.js", "circular3.js"]
+        l.to_vec(),
+        vec![
+          "file:///circular1.js",
+          "file:///circular2.js",
+          "file:///circular3.js"
+        ]
       );
 
-      let modules = &loader.modules;
+      let modules = modules_.lock().unwrap();
 
-      assert_eq!(modules.get_id("circular1.js"), Some(circular1_id));
-      let circular2_id = modules.get_id("circular2.js").unwrap();
+      assert_eq!(modules.get_id("file:///circular1.js"), Some(circular1_id));
+      let circular2_id = modules.get_id("file:///circular2.js").unwrap();
 
       assert_eq!(
         modules.get_children(circular1_id),
-        Some(&vec!["circular2.js".to_string()])
+        Some(&vec!["file:///circular2.js".to_string()])
       );
 
       assert_eq!(
         modules.get_children(circular2_id),
-        Some(&vec!["circular3.js".to_string()])
+        Some(&vec!["file:///circular3.js".to_string()])
       );
 
-      assert!(modules.get_id("circular3.js").is_some());
-      let circular3_id = modules.get_id("circular3.js").unwrap();
+      assert!(modules.get_id("file:///circular3.js").is_some());
+      let circular3_id = modules.get_id("file:///circular3.js").unwrap();
       assert_eq!(
         modules.get_children(circular3_id),
         Some(&vec![
-          "circular1.js".to_string(),
-          "circular2.js".to_string()
+          "file:///circular1.js".to_string(),
+          "file:///circular2.js".to_string()
         ])
       );
     } else {
@@ -813,30 +824,45 @@ mod tests {
   #[test]
   fn test_redirect_load() {
     let loader = MockLoader::new();
-    let mut recursive_load = RecursiveLoad::new("redirect1.js", loader);
+    let isolate = loader.isolate.clone();
+    let isolate_ = isolate.clone();
+    let modules = loader.modules.clone();
+    let modules_ = modules.clone();
+    let loads = loader.loads.clone();
+    let mut recursive_load =
+      RecursiveLoad::new("/redirect1.js", loader, isolate, modules);
 
     let result = recursive_load.poll();
     assert!(result.is_ok());
-    if let Async::Ready((redirect1_id, mut loader)) = result.ok().unwrap() {
-      js_check(loader.isolate.mod_evaluate(redirect1_id));
+    if let Async::Ready(redirect1_id) = result.ok().unwrap() {
+      let mut isolate = isolate_.lock().unwrap();
+      js_check(isolate.mod_evaluate(redirect1_id));
+      let l = loads.lock().unwrap();
       assert_eq!(
-        loader.loads,
-        vec!["redirect1.js", "./redirect2.js", "./dir/redirect3.js"]
+        l.to_vec(),
+        vec![
+          "file:///redirect1.js",
+          "file:///redirect2.js",
+          "file:///dir/redirect3.js"
+        ]
       );
 
-      let modules = &loader.modules;
+      let modules = modules_.lock().unwrap();
 
-      assert_eq!(modules.get_id("redirect1.js"), Some(redirect1_id));
+      assert_eq!(modules.get_id("file:///redirect1.js"), Some(redirect1_id));
 
-      let redirect2_id = modules.get_id("./dir/redirect2.js").unwrap();
-      assert!(modules.is_alias("./redirect2.js"));
-      assert!(!modules.is_alias("./dir/redirect2.js"));
-      assert_eq!(modules.get_id("./redirect2.js").unwrap(), redirect2_id);
+      let redirect2_id = modules.get_id("file:///dir/redirect2.js").unwrap();
+      assert!(modules.is_alias("file:///redirect2.js"));
+      assert!(!modules.is_alias("file:///dir/redirect2.js"));
+      assert_eq!(modules.get_id("file:///redirect2.js"), Some(redirect2_id));
 
-      let redirect3_id = modules.get_id("./redirect3.js").unwrap();
-      assert!(modules.is_alias("./dir/redirect3.js"));
-      assert!(!modules.is_alias("./redirect3.js"));
-      assert_eq!(modules.get_id("./dir/redirect3.js").unwrap(), redirect3_id);
+      let redirect3_id = modules.get_id("file:///redirect3.js").unwrap();
+      assert!(modules.is_alias("file:///dir/redirect3.js"));
+      assert!(!modules.is_alias("file:///redirect3.js"));
+      assert_eq!(
+        modules.get_id("file:///dir/redirect3.js"),
+        Some(redirect3_id)
+      );
     } else {
       unreachable!();
     }
@@ -845,48 +871,59 @@ mod tests {
   // main.js
   const MAIN_SRC: &str = r#"
     // never_ready.js never loads.
-    import "never_ready.js";
+    import "/never_ready.js";
     // slow.js resolves after one tick.
-    import "slow.js";
+    import "/slow.js";
   "#;
 
   // slow.js
   const SLOW_SRC: &str = r#"
     // Circular import of never_ready.js
     // Does this trigger two Loader calls? It shouldn't.
-    import "never_ready.js";
-    import "a.js";
+    import "/never_ready.js";
+    import "/a.js";
   "#;
 
   #[test]
   fn slow_never_ready_modules() {
     let loader = MockLoader::new();
-    let mut recursive_load = RecursiveLoad::new("main.js", loader);
+    let isolate = loader.isolate.clone();
+    let modules = loader.modules.clone();
+    let loads = loader.loads.clone();
+    let mut recursive_load =
+      RecursiveLoad::new("/main.js", loader, isolate, modules);
 
     let result = recursive_load.poll();
     assert!(result.is_ok());
     assert!(result.ok().unwrap().is_not_ready());
 
     {
-      let loader = recursive_load.loader.as_ref().unwrap();
-      assert_eq!(loader.loads, vec!["main.js", "never_ready.js", "slow.js"]);
+      let l = loads.lock().unwrap();
+      assert_eq!(
+        l.to_vec(),
+        vec![
+          "file:///main.js",
+          "file:///never_ready.js",
+          "file:///slow.js"
+        ]
+      );
     }
 
     for _ in 0..10 {
       let result = recursive_load.poll();
       assert!(result.is_ok());
       assert!(result.ok().unwrap().is_not_ready());
-      let loader = recursive_load.loader.as_ref().unwrap();
+      let l = loads.lock().unwrap();;
       assert_eq!(
-        loader.loads,
+        l.to_vec(),
         vec![
-          "main.js",
-          "never_ready.js",
-          "slow.js",
-          "a.js",
-          "b.js",
-          "c.js",
-          "d.js"
+          "file:///main.js",
+          "file:///never_ready.js",
+          "file:///slow.js",
+          "file:///a.js",
+          "file:///b.js",
+          "file:///c.js",
+          "file:///d.js"
         ]
       );
     }
@@ -900,12 +937,17 @@ mod tests {
   #[test]
   fn loader_disappears_after_error() {
     let loader = MockLoader::new();
-    let mut recursive_load = RecursiveLoad::new("bad_import.js", loader);
+    let isolate = loader.isolate.clone();
+    let modules = loader.modules.clone();
+    let mut recursive_load =
+      RecursiveLoad::new("/bad_import.js", loader, isolate, modules);
     let result = recursive_load.poll();
     assert!(result.is_err());
-    let (either_err, _loader) = result.err().unwrap();
-    assert_eq!(either_err, JSErrorOr::Other(MockError::ResolveErr));
-    assert!(recursive_load.loader.is_none());
+    let err = result.err().unwrap();
+    assert_eq!(
+      err.downcast_ref::<MockError>().unwrap(),
+      &MockError::ResolveErr
+    );
   }
 
   #[test]

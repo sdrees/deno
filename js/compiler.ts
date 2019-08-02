@@ -1,76 +1,49 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
-import * as ts from "typescript";
 import * as msg from "gen/cli/msg_generated";
-import { window } from "./window";
+import * as ts from "typescript";
+
 import { assetSourceCode } from "./assets";
 import { bold, cyan, yellow } from "./colors";
 import { Console } from "./console";
 import { core } from "./core";
+import { Diagnostic, fromTypeScriptDiagnostic } from "./diagnostics";
 import { cwd } from "./dir";
 import { sendSync } from "./dispatch";
 import * as flatbuffers from "./flatbuffers";
 import * as os from "./os";
 import { TextDecoder, TextEncoder } from "./text_encoding";
-import { clearTimer, setTimeout } from "./timers";
+import { assert, notImplemented } from "./util";
+import * as util from "./util";
+import { window } from "./window";
 import { postMessage, workerClose, workerMain } from "./workers";
-import { assert, log, notImplemented } from "./util";
+import { writeFileSync } from "./write_file";
 
-const EOL = "\n";
-const ASSETS = "$asset$";
-const LIB_RUNTIME = `${ASSETS}/lib.deno_runtime.d.ts`;
-
-// An instance of console
+// Startup boilerplate. This is necessary because the compiler has its own
+// snapshot. (It would be great if we could remove these things or centralize
+// them somewhere else.)
 const console = new Console(core.print);
+window.console = console;
+window.workerMain = workerMain;
+export default function denoMain(): void {
+  os.start("TS");
+}
 
-/** The location that a module is being loaded from. This could be a directory,
- * like `.`, or it could be a module specifier like
- * `http://gist.github.com/somefile.ts`
- */
-type ContainingFile = string;
-/** The internal local filename of a compiled module. It will often be something
- * like `/home/ry/.deno/gen/f7b4605dfbc4d3bb356e98fda6ceb1481e4a8df5.js`
- */
-type ModuleFileName = string;
-/** The original resolved resource name.
- * Path to cached module file or URL from which dependency was retrieved
- */
-type ModuleId = string;
-/** The external name of a module - could be a URL or could be a relative path.
- * Examples `http://gist.github.com/somefile.ts` or `./somefile.ts`
- */
-type ModuleSpecifier = string;
-/** The compiled source code which is cached in `.deno/gen/` */
-type OutputCode = string;
-/** The original source code */
-type SourceCode = string;
-/** The output source map */
-type SourceMap = string;
+const ASSETS = "$asset$";
+const OUT_DIR = "$deno$";
 
 /** The format of the work message payload coming from the privileged side */
-interface CompilerLookup {
-  specifier: ModuleSpecifier;
-  referrer: ContainingFile;
-  cmdId: number;
+interface CompilerReq {
+  rootNames: string[];
+  bundle?: string;
+  // TODO(ry) add compiler config to this interface.
+  // options: ts.CompilerOptions;
+  configPath?: string;
+  config?: string;
 }
 
-/** Abstraction of the APIs required from the `os` module so they can be
- * easily mocked.
- */
-interface Os {
-  fetchModuleMetaData: typeof os.fetchModuleMetaData;
-  exit: typeof os.exit;
-  noColor: typeof os.noColor;
-}
-
-/** Abstraction of the APIs required from the `typescript` module so they can
- * be easily mocked.
- */
-interface Ts {
-  convertCompilerOptionsFromJson: typeof ts.convertCompilerOptionsFromJson;
-  createLanguageService: typeof ts.createLanguageService;
-  formatDiagnosticsWithColorAndContext: typeof ts.formatDiagnosticsWithColorAndContext;
-  formatDiagnostics: typeof ts.formatDiagnostics;
-  parseConfigFileTextToJson: typeof ts.parseConfigFileTextToJson;
+interface ConfigureResponse {
+  ignoredOptions?: string[];
+  diagnostics?: ts.Diagnostic[];
 }
 
 /** Options that either do nothing in Deno, or would cause undesired behavior
@@ -134,48 +107,102 @@ const ignoredCompilerOptions: ReadonlyArray<string> = [
   "watch"
 ];
 
-/** A simple object structure for caching resolved modules and their contents.
- *
- * Named `ModuleMetaData` to clarify it is just a representation of meta data of
- * the module, not the actual module instance.
- */
-class ModuleMetaData implements ts.IScriptSnapshot {
-  public scriptVersion = "";
+interface SourceFile {
+  moduleName: string | undefined;
+  filename: string | undefined;
+  mediaType: msg.MediaType;
+  sourceCode: string | undefined;
+}
 
-  constructor(
-    public readonly moduleId: ModuleId,
-    public readonly fileName: ModuleFileName,
-    public readonly mediaType: msg.MediaType,
-    public readonly sourceCode: SourceCode = "",
-    public outputCode: OutputCode = "",
-    public sourceMap: SourceMap = ""
-  ) {
-    if (outputCode !== "" || fileName.endsWith(".d.ts")) {
-      this.scriptVersion = "1";
-    }
+interface EmitResult {
+  emitSkipped: boolean;
+  diagnostics?: Diagnostic;
+}
+
+/** Ops to Rust to resolve and fetch a modules meta data. */
+function fetchSourceFile(specifier: string, referrer: string): SourceFile {
+  util.log("compiler.fetchSourceFile", { specifier, referrer });
+  // Send FetchSourceFile message
+  const builder = flatbuffers.createBuilder();
+  const specifier_ = builder.createString(specifier);
+  const referrer_ = builder.createString(referrer);
+  const inner = msg.FetchSourceFile.createFetchSourceFile(
+    builder,
+    specifier_,
+    referrer_
+  );
+  const baseRes = sendSync(builder, msg.Any.FetchSourceFile, inner);
+  assert(baseRes != null);
+  assert(
+    msg.Any.FetchSourceFileRes === baseRes!.innerType(),
+    `base.innerType() unexpectedly is ${baseRes!.innerType()}`
+  );
+  const fetchSourceFileRes = new msg.FetchSourceFileRes();
+  assert(baseRes!.inner(fetchSourceFileRes) != null);
+  const dataArray = fetchSourceFileRes.dataArray();
+  const decoder = new TextDecoder();
+  const sourceCode = dataArray ? decoder.decode(dataArray) : undefined;
+  // flatbuffers returns `null` for an empty value, this does not fit well with
+  // idiomatic TypeScript under strict null checks, so converting to `undefined`
+  return {
+    moduleName: fetchSourceFileRes.moduleName() || undefined,
+    filename: fetchSourceFileRes.filename() || undefined,
+    mediaType: fetchSourceFileRes.mediaType(),
+    sourceCode
+  };
+}
+
+/** Utility function to turn the number of bytes into a human readable
+ * unit */
+function humanFileSize(bytes: number): string {
+  const thresh = 1000;
+  if (Math.abs(bytes) < thresh) {
+    return bytes + " B";
   }
+  const units = ["kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
+  let u = -1;
+  do {
+    bytes /= thresh;
+    ++u;
+  } while (Math.abs(bytes) >= thresh && u < units.length - 1);
+  return `${bytes.toFixed(1)} ${units[u]}`;
+}
 
-  /** TypeScript IScriptSnapshot Interface */
+/** Ops to rest for caching source map and compiled js */
+function cache(extension: string, moduleId: string, contents: string): void {
+  util.log("compiler.cache", moduleId);
+  const builder = flatbuffers.createBuilder();
+  const extension_ = builder.createString(extension);
+  const moduleId_ = builder.createString(moduleId);
+  const contents_ = builder.createString(contents);
+  const inner = msg.Cache.createCache(
+    builder,
+    extension_,
+    moduleId_,
+    contents_
+  );
+  const baseRes = sendSync(builder, msg.Any.Cache, inner);
+  assert(baseRes == null);
+}
 
-  public getText(start: number, end: number): string {
-    return start === 0 && end === this.sourceCode.length
-      ? this.sourceCode
-      : this.sourceCode.substring(start, end);
+const encoder = new TextEncoder();
+
+/** Given a fileName and the data, emit the file to the file system. */
+function emitBundle(fileName: string, data: string): void {
+  // For internal purposes, when trying to emit to `$deno$` just no-op
+  if (fileName.startsWith("$deno$")) {
+    console.warn("skipping compiler.emitBundle", fileName);
+    return;
   }
-
-  public getLength(): number {
-    return this.sourceCode.length;
-  }
-
-  public getChangeRange(): undefined {
-    // Required `IScriptSnapshot` API, but not implemented/needed in deno
-    return undefined;
-  }
+  const encodedData = encoder.encode(data);
+  console.log(`Emitting bundle to "${fileName}"`);
+  writeFileSync(fileName, encodedData);
+  console.log(`${humanFileSize(encodedData.length)} emitted.`);
 }
 
 /** Returns the TypeScript Extension enum for a given media type. */
 function getExtension(
-  fileName: ModuleFileName,
+  fileName: string,
   mediaType: msg.MediaType
 ): ts.Extension {
   switch (mediaType) {
@@ -191,300 +218,79 @@ function getExtension(
   }
 }
 
-/** Generate output code for a provided JSON string along with its source. */
-function jsonEsmTemplate(
-  jsonString: string,
-  sourceFileName: string
-): OutputCode {
-  return (
-    `const _json = JSON.parse(\`${jsonString}\`);\n` +
-    `export default _json;\n` +
-    `//# sourceURL=${sourceFileName}\n`
-  );
-}
+class Host implements ts.CompilerHost {
+  extensionCache: Record<string, ts.Extension> = {};
 
-/** A singleton class that combines the TypeScript Language Service host API
- * with Deno specific APIs to provide an interface for compiling and running
- * TypeScript and JavaScript modules.
- */
-class Compiler implements ts.LanguageServiceHost, ts.FormatDiagnosticsHost {
-  // Modules are usually referenced by their ModuleSpecifier and ContainingFile,
-  // and keeping a map of the resolved module file name allows more efficient
-  // future resolution
-  private readonly _fileNamesMap = new Map<
-    ContainingFile,
-    Map<ModuleSpecifier, ModuleFileName>
-  >();
-  // A reference to the log utility, so it can be monkey patched during testing
-  private _log = log;
-  // A map of module file names to module meta data
-  private readonly _moduleMetaDataMap = new Map<
-    ModuleFileName,
-    ModuleMetaData
-  >();
-  // TODO ideally this are not static and can be influenced by command line
-  // arguments
   private readonly _options: ts.CompilerOptions = {
     allowJs: true,
     allowNonTsExtensions: true,
-    checkJs: true,
+    checkJs: false,
     esModuleInterop: true,
     module: ts.ModuleKind.ESNext,
-    outDir: "$deno$",
+    outDir: OUT_DIR,
     resolveJsonModule: true,
     sourceMap: true,
     stripComments: true,
     target: ts.ScriptTarget.ESNext
   };
-  // A reference to the `./os.ts` module, so it can be monkey patched during
-  // testing
-  private _os: Os = os;
-  // Used to contain the script file we are currently running
-  private _scriptFileNames: string[] = [];
-  // A reference to the TypeScript LanguageService instance so it can be
-  // monkey patched during testing
-  private _service: ts.LanguageService;
-  // A reference to `typescript` module so it can be monkey patched during
-  // testing
-  private _ts: Ts = ts;
 
-  private readonly _assetsSourceCode: { [key: string]: string };
+  private _resolveModule(specifier: string, referrer: string): SourceFile {
+    // Handle built-in assets specially.
+    if (specifier.startsWith(ASSETS)) {
+      const moduleName = specifier.split("/").pop()!;
+      const assetName = moduleName.includes(".")
+        ? moduleName
+        : `${moduleName}.d.ts`;
+      assert(assetName in assetSourceCode, `No such asset "${assetName}"`);
+      const sourceCode = assetSourceCode[assetName];
+      return {
+        moduleName,
+        filename: specifier,
+        mediaType: msg.MediaType.TypeScript,
+        sourceCode
+      };
+    }
+    return fetchSourceFile(specifier, referrer);
+  }
 
-  /** The TypeScript language service often refers to the resolved fileName of
-   * a module, this is a shortcut to avoid unnecessary module resolution logic
-   * for modules that may have been initially resolved by a `moduleSpecifier`
-   * and `containingFile`.  Also, `resolveModule()` throws when the module
-   * cannot be resolved, which isn't always valid when dealing with the
-   * TypeScript compiler, but the TypeScript compiler shouldn't be asking about
-   * external modules that we haven't told it about yet.
+  /* Deno specific APIs */
+
+  /** Provides the `ts.HostCompiler` interface for Deno.
+   *
+   * @param _bundle Set to a string value to configure the host to write out a
+   *   bundle instead of caching individual files.
    */
-  private _getModuleMetaData(
-    fileName: ModuleFileName
-  ): ModuleMetaData | undefined {
-    return (
-      this._moduleMetaDataMap.get(fileName) ||
-      (fileName.startsWith(ASSETS)
-        ? this._resolveModule(fileName, "")
-        : undefined)
-    );
-  }
-
-  /** Log TypeScript diagnostics to the console and exit */
-  private _logDiagnostics(diagnostics: ts.Diagnostic[]): never {
-    const errMsg = this._os.noColor
-      ? this._ts.formatDiagnostics(diagnostics, this)
-      : this._ts.formatDiagnosticsWithColorAndContext(diagnostics, this);
-
-    console.log(errMsg);
-    // TODO The compiler isolate shouldn't exit.  Errors should be forwarded to
-    // to the caller and the caller exit.
-    return this._os.exit(1);
-  }
-
-  /** Given a `moduleSpecifier` and `containingFile` retrieve the cached
-   * `fileName` for a given module.  If the module has yet to be resolved
-   * this will return `undefined`.
-   */
-  private _resolveFileName(
-    moduleSpecifier: ModuleSpecifier,
-    containingFile: ContainingFile
-  ): ModuleFileName | undefined {
-    this._log("compiler._resolveFileName", { moduleSpecifier, containingFile });
-    const innerMap = this._fileNamesMap.get(containingFile);
-    if (innerMap) {
-      return innerMap.get(moduleSpecifier);
+  constructor(private _bundle?: string) {
+    if (this._bundle) {
+      // options we need to change when we are generating a bundle
+      const bundlerOptions: ts.CompilerOptions = {
+        module: ts.ModuleKind.AMD,
+        inlineSourceMap: true,
+        outDir: undefined,
+        outFile: `${OUT_DIR}/bundle.js`,
+        sourceMap: false
+      };
+      Object.assign(this._options, bundlerOptions);
     }
-    return undefined;
-  }
-
-  /** Given a `moduleSpecifier` and `containingFile`, resolve the module and
-   * return the `ModuleMetaData`.
-   */
-  private _resolveModule(
-    moduleSpecifier: ModuleSpecifier,
-    containingFile: ContainingFile
-  ): ModuleMetaData {
-    this._log("compiler._resolveModule", { moduleSpecifier, containingFile });
-    assert(moduleSpecifier != null && moduleSpecifier.length > 0);
-    let fileName = this._resolveFileName(moduleSpecifier, containingFile);
-    if (fileName && this._moduleMetaDataMap.has(fileName)) {
-      return this._moduleMetaDataMap.get(fileName)!;
-    }
-    let moduleId: ModuleId | undefined;
-    let mediaType = msg.MediaType.Unknown;
-    let sourceCode: SourceCode | undefined;
-    if (
-      moduleSpecifier.startsWith(ASSETS) ||
-      containingFile.startsWith(ASSETS)
-    ) {
-      // Assets are compiled into the runtime javascript bundle.
-      // we _know_ `.pop()` will return a string, but TypeScript doesn't so
-      // not null assertion
-      moduleId = moduleSpecifier.split("/").pop()!;
-      const assetName = moduleId.includes(".") ? moduleId : `${moduleId}.d.ts`;
-      assert(
-        assetName in this._assetsSourceCode,
-        `No such asset "${assetName}"`
-      );
-      mediaType = msg.MediaType.TypeScript;
-      sourceCode = this._assetsSourceCode[assetName];
-      fileName = `${ASSETS}/${assetName}`;
-    } else {
-      // We query Rust with a CodeFetch message. It will load the sourceCode,
-      // and if there is any outputCode cached, will return that as well.
-      const fetchResponse = this._os.fetchModuleMetaData(
-        moduleSpecifier,
-        containingFile
-      );
-      moduleId = fetchResponse.moduleName;
-      fileName = fetchResponse.filename;
-      mediaType = fetchResponse.mediaType;
-      sourceCode = fetchResponse.sourceCode;
-    }
-    assert(moduleId != null, "No module ID.");
-    assert(fileName != null, "No file name.");
-    assert(
-      mediaType !== msg.MediaType.Unknown,
-      `Unknown media type for: "${moduleSpecifier}" from "${containingFile}".`
-    );
-    this._log(
-      "resolveModule sourceCode length:",
-      sourceCode && sourceCode.length
-    );
-    this._log("resolveModule has media type:", msg.MediaType[mediaType]);
-    // fileName is asserted above, but TypeScript does not track so not null
-    this._setFileName(moduleSpecifier, containingFile, fileName!);
-    if (fileName && this._moduleMetaDataMap.has(fileName)) {
-      return this._moduleMetaDataMap.get(fileName)!;
-    }
-    const moduleMetaData = new ModuleMetaData(
-      moduleId!,
-      fileName!,
-      mediaType,
-      sourceCode
-    );
-    this._moduleMetaDataMap.set(fileName!, moduleMetaData);
-    return moduleMetaData;
-  }
-
-  /** Caches the resolved `fileName` in relationship to the `moduleSpecifier`
-   * and `containingFile` in order to reduce calls to the privileged side
-   * to retrieve the contents of a module.
-   */
-  private _setFileName(
-    moduleSpecifier: ModuleSpecifier,
-    containingFile: ContainingFile,
-    fileName: ModuleFileName
-  ): void {
-    this._log("compiler._setFileName", { moduleSpecifier, containingFile });
-    let innerMap = this._fileNamesMap.get(containingFile);
-    if (!innerMap) {
-      innerMap = new Map();
-      this._fileNamesMap.set(containingFile, innerMap);
-    }
-    innerMap.set(moduleSpecifier, fileName);
-  }
-
-  constructor(assetsSourceCode: { [key: string]: string }) {
-    this._assetsSourceCode = assetsSourceCode;
-    this._service = this._ts.createLanguageService(this);
-  }
-
-  // Deno specific compiler API
-
-  /** Retrieve the output of the TypeScript compiler for a given module.
-   */
-  compile(
-    moduleSpecifier: ModuleSpecifier,
-    containingFile: ContainingFile
-  ): { outputCode: OutputCode; sourceMap: SourceMap } {
-    this._log("compiler.compile", { moduleSpecifier, containingFile });
-    const moduleMetaData = this._resolveModule(moduleSpecifier, containingFile);
-    const { fileName, mediaType, sourceCode } = moduleMetaData;
-    this._scriptFileNames = [fileName];
-    let outputCode: string;
-    let sourceMap = "";
-    // Instead of using TypeScript to transpile JSON modules, we will just do
-    // it directly.
-    if (mediaType === msg.MediaType.Json) {
-      outputCode = moduleMetaData.outputCode = jsonEsmTemplate(
-        sourceCode,
-        fileName
-      );
-    } else {
-      const service = this._service;
-      assert(
-        mediaType === msg.MediaType.TypeScript ||
-          mediaType === msg.MediaType.JavaScript
-      );
-      const output = service.getEmitOutput(fileName);
-
-      // Get the relevant diagnostics - this is 3x faster than
-      // `getPreEmitDiagnostics`.
-      const diagnostics = [
-        // TypeScript is overly opinionated that only CommonJS modules kinds can
-        // support JSON imports.  Allegedly this was fixed in
-        // Microsoft/TypeScript#26825 but that doesn't seem to be working here,
-        // so we will ignore complaints about this compiler setting.
-        ...service
-          .getCompilerOptionsDiagnostics()
-          .filter((diagnostic): boolean => diagnostic.code !== 5070),
-        ...service.getSyntacticDiagnostics(fileName),
-        ...service.getSemanticDiagnostics(fileName)
-      ];
-      if (diagnostics.length > 0) {
-        this._logDiagnostics(diagnostics);
-      }
-
-      assert(
-        !output.emitSkipped,
-        "The emit was skipped for an unknown reason."
-      );
-
-      assert(
-        output.outputFiles.length === 2,
-        `Expected 2 files to be emitted, got ${output.outputFiles.length}.`
-      );
-
-      const [sourceMapFile, outputFile] = output.outputFiles;
-      assert(
-        sourceMapFile.name.endsWith(".map"),
-        "Expected first emitted file to be a source map"
-      );
-      assert(
-        outputFile.name.endsWith(".js"),
-        "Expected second emitted file to be JavaScript"
-      );
-      outputCode = moduleMetaData.outputCode = `${
-        outputFile.text
-      }\n//# sourceURL=${fileName}`;
-      sourceMap = moduleMetaData.sourceMap = sourceMapFile.text;
-    }
-
-    moduleMetaData.scriptVersion = "1";
-    return { outputCode, sourceMap };
   }
 
   /** Take a configuration string, parse it, and use it to merge with the
    * compiler's configuration options.  The method returns an array of compiler
    * options which were ignored, or `undefined`.
    */
-  configure(path: string, configurationText: string): string[] | undefined {
-    this._log("compile.configure", path);
-    const { config, error } = this._ts.parseConfigFileTextToJson(
+  configure(path: string, configurationText: string): ConfigureResponse {
+    util.log("compile.configure", path);
+    const { config, error } = ts.parseConfigFileTextToJson(
       path,
       configurationText
     );
     if (error) {
-      this._logDiagnostics([error]);
+      return { diagnostics: [error] };
     }
-    const { options, errors } = this._ts.convertCompilerOptionsFromJson(
+    const { options, errors } = ts.convertCompilerOptionsFromJson(
       config.compilerOptions,
       cwd()
     );
-    if (errors.length) {
-      this._logDiagnostics(errors);
-    }
     const ignoredOptions: string[] = [];
     for (const key of Object.keys(options)) {
       if (
@@ -496,198 +302,225 @@ class Compiler implements ts.LanguageServiceHost, ts.FormatDiagnosticsHost {
       }
     }
     Object.assign(this._options, options);
-    return ignoredOptions.length ? ignoredOptions : undefined;
+    return {
+      ignoredOptions: ignoredOptions.length ? ignoredOptions : undefined,
+      diagnostics: errors.length ? errors : undefined
+    };
   }
 
-  // TypeScript Language Service and Format Diagnostic Host API
+  /* TypeScript CompilerHost APIs */
+
+  fileExists(_fileName: string): boolean {
+    return notImplemented();
+  }
 
   getCanonicalFileName(fileName: string): string {
-    this._log("getCanonicalFileName", fileName);
+    // console.log("getCanonicalFileName", fileName);
     return fileName;
   }
 
   getCompilationSettings(): ts.CompilerOptions {
-    this._log("getCompilationSettings()");
+    util.log("getCompilationSettings()");
     return this._options;
   }
 
-  getNewLine(): string {
-    return EOL;
-  }
-
-  getScriptFileNames(): string[] {
-    // This is equal to `"files"` in the `tsconfig.json`, therefore we only need
-    // to include the actual base source files we are evaluating at the moment,
-    // which would be what is set during the `.compile()`
-    return this._scriptFileNames;
-  }
-
-  getScriptKind(fileName: ModuleFileName): ts.ScriptKind {
-    this._log("getScriptKind()", fileName);
-    const moduleMetaData = this._getModuleMetaData(fileName);
-    if (moduleMetaData) {
-      switch (moduleMetaData.mediaType) {
-        case msg.MediaType.TypeScript:
-          return ts.ScriptKind.TS;
-        case msg.MediaType.JavaScript:
-          return ts.ScriptKind.JS;
-        case msg.MediaType.Json:
-          return ts.ScriptKind.JSON;
-        default:
-          return this._options.allowJs ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-      }
-    } else {
-      return this._options.allowJs ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-    }
-  }
-
-  getScriptVersion(fileName: ModuleFileName): string {
-    const moduleMetaData = this._getModuleMetaData(fileName);
-    const version = (moduleMetaData && moduleMetaData.scriptVersion) || "";
-    this._log("getScriptVersion()", fileName, version);
-    return version;
-  }
-
-  getScriptSnapshot(fileName: ModuleFileName): ts.IScriptSnapshot | undefined {
-    this._log("getScriptSnapshot()", fileName);
-    return this._getModuleMetaData(fileName);
-  }
-
   getCurrentDirectory(): string {
-    this._log("getCurrentDirectory()");
     return "";
   }
 
-  getDefaultLibFileName(): string {
-    this._log("getDefaultLibFileName()");
-    const moduleSpecifier = LIB_RUNTIME;
-    const moduleMetaData = this._getModuleMetaData(moduleSpecifier);
-    assert(moduleMetaData != null);
-    return moduleMetaData!.fileName;
+  getDefaultLibFileName(_options: ts.CompilerOptions): string {
+    return ASSETS + "/lib.deno_runtime.d.ts";
   }
 
-  useCaseSensitiveFileNames(): boolean {
-    this._log("useCaseSensitiveFileNames()");
-    return true;
+  getNewLine(): string {
+    return "\n";
   }
 
-  readFile(path: string): string | undefined {
-    this._log("readFile()", path);
+  getSourceFile(
+    fileName: string,
+    languageVersion: ts.ScriptTarget,
+    onError?: (message: string) => void,
+    shouldCreateNewSourceFile?: boolean
+  ): ts.SourceFile | undefined {
+    assert(!shouldCreateNewSourceFile);
+    util.log("getSourceFile", fileName);
+    const SourceFile = this._resolveModule(fileName, ".");
+    if (!SourceFile || !SourceFile.sourceCode) {
+      return undefined;
+    }
+    return ts.createSourceFile(
+      fileName,
+      SourceFile.sourceCode,
+      languageVersion
+    );
+  }
+
+  readFile(_fileName: string): string | undefined {
     return notImplemented();
   }
 
-  fileExists(fileName: string): boolean {
-    const moduleMetaData = this._getModuleMetaData(fileName);
-    const exists = moduleMetaData != null;
-    this._log("fileExists()", fileName, exists);
-    return exists;
+  resolveModuleNames(
+    moduleNames: string[],
+    containingFile: string
+  ): Array<ts.ResolvedModuleFull | undefined> {
+    util.log("resolveModuleNames()", { moduleNames, containingFile });
+    return moduleNames.map(
+      (moduleName): ts.ResolvedModuleFull | undefined => {
+        const SourceFile = this._resolveModule(moduleName, containingFile);
+        if (SourceFile.moduleName) {
+          const resolvedFileName = SourceFile.moduleName;
+          // This flags to the compiler to not go looking to transpile functional
+          // code, anything that is in `/$asset$/` is just library code
+          const isExternalLibraryImport = moduleName.startsWith(ASSETS);
+          const extension = getExtension(
+            resolvedFileName,
+            SourceFile.mediaType
+          );
+          this.extensionCache[resolvedFileName] = extension;
+
+          const r = {
+            resolvedFileName,
+            isExternalLibraryImport,
+            extension
+          };
+          return r;
+        } else {
+          return undefined;
+        }
+      }
+    );
   }
 
-  resolveModuleNames(
-    moduleNames: ModuleSpecifier[],
-    containingFile: ContainingFile
-  ): Array<ts.ResolvedModuleFull | ts.ResolvedModule> {
-    this._log("resolveModuleNames()", { moduleNames, containingFile });
-    const resolvedModuleNames: ts.ResolvedModuleFull[] = [];
-    for (const moduleName of moduleNames) {
-      const moduleMetaData = this._resolveModule(moduleName, containingFile);
-      // According to the interface we shouldn't return `undefined` but if we
-      // fail to return the same length of modules to those we cannot resolve
-      // then TypeScript fails on an assertion that the lengths can't be
-      // different, so we have to return an "empty" resolved module
-      // TODO: all this does is push the problem downstream, and TypeScript
-      // will complain it can't identify the type of the file and throw
-      // a runtime exception, so we need to handle missing modules better
-      const resolvedFileName = moduleMetaData.fileName || "";
-      // This flags to the compiler to not go looking to transpile functional
-      // code, anything that is in `/$asset$/` is just library code
-      const isExternalLibraryImport = resolvedFileName.startsWith(ASSETS);
-      resolvedModuleNames.push({
-        resolvedFileName,
-        isExternalLibraryImport,
-        extension: getExtension(resolvedFileName, moduleMetaData.mediaType)
-      });
+  useCaseSensitiveFileNames(): boolean {
+    return true;
+  }
+
+  writeFile(
+    fileName: string,
+    data: string,
+    writeByteOrderMark: boolean,
+    onError?: (message: string) => void,
+    sourceFiles?: ReadonlyArray<ts.SourceFile>
+  ): void {
+    util.log("writeFile", fileName);
+    try {
+      if (this._bundle) {
+        emitBundle(this._bundle, data);
+      } else {
+        assert(sourceFiles != null && sourceFiles.length == 1);
+        const sourceFileName = sourceFiles![0].fileName;
+        const maybeExtension = this.extensionCache[sourceFileName];
+
+        if (maybeExtension) {
+          // NOTE: If it's a `.json` file we don't want to write it to disk.
+          // JSON files are loaded and used by TS compiler to check types, but we don't want
+          // to emit them to disk because output file is the same as input file.
+          if (maybeExtension === ts.Extension.Json) {
+            return;
+          }
+
+          // NOTE: JavaScript files are only emitted to disk if `checkJs` option in on
+          if (maybeExtension === ts.Extension.Js && !this._options.checkJs) {
+            return;
+          }
+        }
+
+        if (fileName.endsWith(".map")) {
+          // Source Map
+          cache(".map", sourceFileName, data);
+        } else if (fileName.endsWith(".js") || fileName.endsWith(".json")) {
+          // Compiled JavaScript
+          cache(".js", sourceFileName, data);
+        } else {
+          assert(false, "Trying to cache unhandled file type " + fileName);
+        }
+      }
+    } catch (e) {
+      if (onError) {
+        onError(String(e));
+      } else {
+        throw e;
+      }
     }
-    return resolvedModuleNames;
   }
 }
-
-const compiler = new Compiler(assetSourceCode);
-
-// set global objects for compiler web worker
-window.clearTimeout = clearTimer;
-window.console = console;
-window.postMessage = postMessage;
-window.setTimeout = setTimeout;
-window.workerMain = workerMain;
-window.close = workerClose;
-window.TextDecoder = TextDecoder;
-window.TextEncoder = TextEncoder;
 
 // provide the "main" function that will be called by the privileged side when
 // lazy instantiating the compiler web worker
 window.compilerMain = function compilerMain(): void {
   // workerMain should have already been called since a compiler is a worker.
-  window.onmessage = ({ data }: { data: CompilerLookup }): void => {
-    const { specifier, referrer, cmdId } = data;
+  window.onmessage = ({ data }: { data: CompilerReq }): void => {
+    const { rootNames, configPath, config, bundle } = data;
+    const host = new Host(bundle);
 
-    try {
-      const result = compiler.compile(specifier, referrer);
-      postMessage({
-        success: true,
-        cmdId,
-        data: result
-      });
-    } catch (e) {
-      postMessage({
-        success: false,
-        cmdId,
-        data: JSON.parse(core.errorToJSON(e))
-      });
+    let emitSkipped = true;
+    let diagnostics: ts.Diagnostic[] | undefined;
+
+    // if there is a configuration supplied, we need to parse that
+    if (config && config.length && configPath) {
+      const configResult = host.configure(configPath, config);
+      const ignoredOptions = configResult.ignoredOptions;
+      diagnostics = configResult.diagnostics;
+      if (ignoredOptions) {
+        console.warn(
+          yellow(`Unsupported compiler options in "${configPath}"\n`) +
+            cyan(`  The following options were ignored:\n`) +
+            `    ${ignoredOptions
+              .map((value): string => bold(value))
+              .join(", ")}`
+        );
+      }
     }
+
+    // if there was a configuration and no diagnostics with it, we will continue
+    // to generate the program and possibly emit it.
+    if (!diagnostics || (diagnostics && diagnostics.length === 0)) {
+      const options = host.getCompilationSettings();
+      const program = ts.createProgram(rootNames, options, host);
+
+      diagnostics = ts.getPreEmitDiagnostics(program).filter(
+        ({ code }): boolean => {
+          // TS2691: An import path cannot end with a '.ts' extension. Consider
+          // importing 'bad-module' instead.
+          if (code === 2691) return false;
+          // TS5009: Cannot find the common subdirectory path for the input files.
+          if (code === 5009) return false;
+          // TS5055: Cannot write file
+          // 'http://localhost:4545/tests/subdir/mt_application_x_javascript.j4.js'
+          // because it would overwrite input file.
+          if (code === 5055) return false;
+          // TypeScript is overly opinionated that only CommonJS modules kinds can
+          // support JSON imports.  Allegedly this was fixed in
+          // Microsoft/TypeScript#26825 but that doesn't seem to be working here,
+          // so we will ignore complaints about this compiler setting.
+          if (code === 5070) return false;
+          return true;
+        }
+      );
+
+      // We will only proceed with the emit if there are no diagnostics.
+      if (diagnostics && diagnostics.length === 0) {
+        if (bundle) {
+          console.log(`Bundling "${bundle}"`);
+        }
+        const emitResult = program.emit();
+        emitSkipped = emitResult.emitSkipped;
+        // emitResult.diagnostics is `readonly` in TS3.5+ and can't be assigned
+        // without casting.
+        diagnostics = emitResult.diagnostics as ts.Diagnostic[];
+      }
+    }
+
+    const result: EmitResult = {
+      emitSkipped,
+      diagnostics: diagnostics.length
+        ? fromTypeScriptDiagnostic(diagnostics)
+        : undefined
+    };
+
+    postMessage(result);
+
+    // The compiler isolate exits after a single message.
+    workerClose();
   };
 };
-
-const decoder = new TextDecoder();
-
-// Perform the op to retrieve the compiler configuration if there was any
-// provided on startup.
-function getCompilerConfig(
-  compilerType: string
-): { path: string; data: string } {
-  const builder = flatbuffers.createBuilder();
-  const compilerType_ = builder.createString(compilerType);
-  msg.CompilerConfig.startCompilerConfig(builder);
-  msg.CompilerConfig.addCompilerType(builder, compilerType_);
-  const inner = msg.CompilerConfig.endCompilerConfig(builder);
-  const baseRes = sendSync(builder, msg.Any.CompilerConfig, inner);
-  assert(baseRes != null);
-  assert(msg.Any.CompilerConfigRes === baseRes!.innerType());
-  const res = new msg.CompilerConfigRes();
-  assert(baseRes!.inner(res) != null);
-
-  // the privileged side does not normalize path separators in windows, so we
-  // will normalize them here
-  const path = res.path()!.replace(/\\/g, "/");
-  assert(path != null);
-  const dataArray = res.dataArray()!;
-  assert(dataArray != null);
-  const data = decoder.decode(dataArray);
-  return { path, data };
-}
-
-export default function denoMain(): void {
-  os.start("TS");
-
-  const { path, data } = getCompilerConfig("typescript");
-  if (data.length) {
-    const ignoredOptions = compiler.configure(path, data);
-    if (ignoredOptions) {
-      console.warn(
-        yellow(`Unsupported compiler options in "${path}"\n`) +
-          cyan(`  The following options were ignored:\n`) +
-          `    ${ignoredOptions.map((value): string => bold(value)).join(", ")}`
-      );
-    }
-  }
-}

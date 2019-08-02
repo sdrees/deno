@@ -96,14 +96,13 @@ void PromiseRejectCallback(v8::PromiseRejectMessage promise_reject_message) {
 }
 
 void Print(const v8::FunctionCallbackInfo<v8::Value>& args) {
-  CHECK_GE(args.Length(), 1);
-  CHECK_LE(args.Length(), 3);
   auto* isolate = args.GetIsolate();
-  DenoIsolate* d = DenoIsolate::FromIsolate(isolate);
-  auto context = d->context_.Get(d->isolate_);
+  int argsLen = args.Length();
+  if (argsLen < 1 || argsLen > 2) {
+    ThrowInvalidArgument(isolate);
+  }
   v8::HandleScope handle_scope(isolate);
-  bool is_err =
-      args.Length() >= 2 ? args[1]->BooleanValue(context).ToChecked() : false;
+  bool is_err = args.Length() >= 2 ? args[1]->BooleanValue(isolate) : false;
   FILE* file = is_err ? stderr : stdout;
 
 #ifdef _WIN32
@@ -320,7 +319,8 @@ void Shared(v8::Local<v8::Name> property,
                                     v8::ArrayBufferCreationMode::kExternalized);
     d->shared_ab_.Reset(isolate, ab);
   }
-  info.GetReturnValue().Set(d->shared_ab_);
+  auto shared_ab = d->shared_ab_.Get(isolate);
+  info.GetReturnValue().Set(shared_ab);
 }
 
 void DenoIsolate::ClearModules() {
@@ -375,7 +375,11 @@ void EvalContext(const v8::FunctionCallbackInfo<v8::Value>& args) {
   auto context = d->context_.Get(isolate);
   v8::Context::Scope context_scope(context);
 
-  CHECK(args[0]->IsString());
+  if (!(args[0]->IsString())) {
+    ThrowInvalidArgument(isolate);
+    return;
+  }
+
   auto source = args[0].As<v8::String>();
 
   auto output = v8::Array::New(isolate, 2);
@@ -396,18 +400,21 @@ void EvalContext(const v8::FunctionCallbackInfo<v8::Value>& args) {
   auto script = v8::Script::Compile(context, source, &origin);
 
   if (script.IsEmpty()) {
-    DCHECK(try_catch.HasCaught());
+    CHECK(try_catch.HasCaught());
     auto exception = try_catch.Exception();
 
-    output->Set(0, v8::Null(isolate));
+    CHECK(output->Set(context, 0, v8::Null(isolate)).FromJust());
 
     auto errinfo_obj = v8::Object::New(isolate);
-    errinfo_obj->Set(v8_str("isCompileError"), v8_bool(true));
-    errinfo_obj->Set(v8_str("isNativeError"),
-                     v8_bool(exception->IsNativeError()));
-    errinfo_obj->Set(v8_str("thrown"), exception);
+    CHECK(errinfo_obj->Set(context, v8_str("isCompileError"), v8_bool(true))
+              .FromJust());
+    CHECK(errinfo_obj
+              ->Set(context, v8_str("isNativeError"),
+                    v8_bool(exception->IsNativeError()))
+              .FromJust());
+    CHECK(errinfo_obj->Set(context, v8_str("thrown"), exception).FromJust());
 
-    output->Set(1, errinfo_obj);
+    CHECK(output->Set(context, 1, errinfo_obj).FromJust());
 
     args.GetReturnValue().Set(output);
     return;
@@ -416,25 +423,28 @@ void EvalContext(const v8::FunctionCallbackInfo<v8::Value>& args) {
   auto result = script.ToLocalChecked()->Run(context);
 
   if (result.IsEmpty()) {
-    DCHECK(try_catch.HasCaught());
+    CHECK(try_catch.HasCaught());
     auto exception = try_catch.Exception();
 
-    output->Set(0, v8::Null(isolate));
+    CHECK(output->Set(context, 0, v8::Null(isolate)).FromJust());
 
     auto errinfo_obj = v8::Object::New(isolate);
-    errinfo_obj->Set(v8_str("isCompileError"), v8_bool(false));
-    errinfo_obj->Set(v8_str("isNativeError"),
-                     v8_bool(exception->IsNativeError()));
-    errinfo_obj->Set(v8_str("thrown"), exception);
+    CHECK(errinfo_obj->Set(context, v8_str("isCompileError"), v8_bool(false))
+              .FromJust());
+    CHECK(errinfo_obj
+              ->Set(context, v8_str("isNativeError"),
+                    v8_bool(exception->IsNativeError()))
+              .FromJust());
+    CHECK(errinfo_obj->Set(context, v8_str("thrown"), exception).FromJust());
 
-    output->Set(1, errinfo_obj);
+    CHECK(output->Set(context, 1, errinfo_obj).FromJust());
 
     args.GetReturnValue().Set(output);
     return;
   }
 
-  output->Set(0, result.ToLocalChecked());
-  output->Set(1, v8::Null(isolate));
+  CHECK(output->Set(context, 0, result.ToLocalChecked()).FromJust());
+  CHECK(output->Set(context, 1, v8::Null(isolate)).FromJust());
   args.GetReturnValue().Set(output);
 }
 
@@ -509,6 +519,42 @@ void HostInitializeImportMetaObjectCallback(v8::Local<v8::Context> context,
   meta->CreateDataProperty(context, v8_str("main"), v8_bool(main)).ToChecked();
 }
 
+v8::MaybeLocal<v8::Promise> HostImportModuleDynamicallyCallback(
+    v8::Local<v8::Context> context, v8::Local<v8::ScriptOrModule> referrer,
+    v8::Local<v8::String> specifier) {
+  auto* isolate = context->GetIsolate();
+  DenoIsolate* d = DenoIsolate::FromIsolate(isolate);
+  v8::Isolate::Scope isolate_scope(isolate);
+  v8::Context::Scope context_scope(context);
+  v8::EscapableHandleScope handle_scope(isolate);
+
+  v8::String::Utf8Value specifier_str(isolate, specifier);
+
+  auto referrer_name = referrer->GetResourceName();
+  v8::String::Utf8Value referrer_name_str(isolate, referrer_name);
+
+  // TODO(ry) I'm not sure what HostDefinedOptions is for or if we're ever going
+  // to use it. For now we check that it is not used. This check may need to be
+  // changed in the future.
+  auto host_defined_options = referrer->GetHostDefinedOptions();
+  CHECK_EQ(host_defined_options->Length(), 0);
+
+  v8::Local<v8::Promise::Resolver> resolver =
+      v8::Promise::Resolver::New(context).ToLocalChecked();
+
+  deno_dyn_import_id import_id = d->next_dyn_import_id_++;
+
+  d->dyn_import_map_.emplace(std::piecewise_construct,
+                             std::make_tuple(import_id),
+                             std::make_tuple(d->isolate_, resolver));
+
+  d->dyn_import_cb_(d->user_data_, *specifier_str, *referrer_name_str,
+                    import_id);
+
+  auto promise = resolver->GetPromise();
+  return handle_scope.Escape(promise);
+}
+
 void DenoIsolate::AddIsolate(v8::Isolate* isolate) {
   isolate_ = isolate;
   isolate_->SetCaptureStackTraceForUncaughtExceptions(
@@ -518,6 +564,8 @@ void DenoIsolate::AddIsolate(v8::Isolate* isolate) {
   isolate_->AddMessageListener(MessageCallback);
   isolate->SetHostInitializeImportMetaObjectCallback(
       HostInitializeImportMetaObjectCallback);
+  isolate->SetHostImportModuleDynamicallyCallback(
+      HostImportModuleDynamicallyCallback);
 }
 
 }  // namespace deno

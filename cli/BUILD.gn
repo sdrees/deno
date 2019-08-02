@@ -3,48 +3,62 @@ import("//build/toolchain/cc_wrapper.gni")
 import("//build_extra/flatbuffers/flatbuffer.gni")
 import("//build_extra/flatbuffers/rust/rust_flatbuffer.gni")
 import("//build_extra/rust/rust.gni")
+import("//third_party/v8/gni/snapshot_toolchain.gni")
 import("//third_party/v8/gni/v8.gni")
-import("//third_party/v8/snapshot_toolchain.gni")
-import("../deno.gni")
+import("deno.gni")
 
 main_extern = [
-  "../core:deno",
-
-  "$rust_build:ansi_term",
-  "$rust_build:atty",
-  "$rust_build:clap",
-  "$rust_build:dirs",
-  "$rust_build:flatbuffers",
-  "$rust_build:futures",
-  "$rust_build:http",
-  "$rust_build:hyper",
-  "$rust_build:hyper_rustls",
-  "$rust_build:lazy_static",
-  "$rust_build:libc",
-  "$rust_build:log",
-  "$rust_build:rand",
-  "$rust_build:regex",
-  "$rust_build:remove_dir_all",
-  "$rust_build:ring",
-  "$rust_build:rustyline",
-  "$rust_build:serde_json",
-  "$rust_build:source_map_mappings",
-  "$rust_build:tempfile",
-  "$rust_build:tokio",
-  "$rust_build:tokio_executor",
-  "$rust_build:tokio_fs",
-  "$rust_build:tokio_io",
-  "$rust_build:tokio_process",
-  "$rust_build:tokio_rustls",
-  "$rust_build:tokio_threadpool",
-  "$rust_build:url",
-  "$rust_build:utime",
+  {
+    label = "../core:deno"
+    crate_name = "deno"
+    crate_type = "rlib"
+  },
+  {
+    label = "$rust_build:serde_derive"
+    crate_name = "serde_derive"
+    crate_type = "proc_macro"
+  },
+]
+main_extern_rlib = [
+  "ansi_term",
+  "atty",
+  "clap",
+  "dirs",
+  "flatbuffers",
+  "futures",
+  "fwdansi",
+  "http",
+  "hyper",
+  "hyper_rustls",
+  "indexmap",
+  "lazy_static",
+  "libc",
+  "log",
+  "rand",
+  "regex",
+  "remove_dir_all",
+  "ring",
+  "rustyline",
+  "serde",
+  "serde_json",
+  "source_map_mappings",
+  "tempfile",
+  "termcolor",
+  "tokio",
+  "tokio_executor",
+  "tokio_fs",
+  "tokio_io",
+  "tokio_process",
+  "tokio_rustls",
+  "tokio_threadpool",
+  "url",
+  "utime",
 ]
 if (is_win) {
-  main_extern += [ "$rust_build:winapi" ]
+  main_extern_rlib += [ "winapi" ]
 }
 if (is_posix) {
-  main_extern += [ "$rust_build:nix" ]
+  main_extern_rlib += [ "nix" ]
 }
 
 ts_sources = [
@@ -63,10 +77,13 @@ ts_sources = [
   "../js/core.ts",
   "../js/custom_event.ts",
   "../js/deno.ts",
+  "../js/diagnostics.ts",
   "../js/dir.ts",
   "../js/dispatch.ts",
   "../js/dispatch_minimal.ts",
   "../js/dom_types.ts",
+  "../js/dom_util.ts",
+  "../js/error_stack.ts",
   "../js/errors.ts",
   "../js/event.ts",
   "../js/event_target.ts",
@@ -77,6 +94,7 @@ ts_sources = [
   "../js/files.ts",
   "../js/flatbuffers.ts",
   "../js/form_data.ts",
+  "../js/get_random_values.ts",
   "../js/globals.ts",
   "../js/headers.ts",
   "../js/io.ts",
@@ -147,13 +165,14 @@ group("deno_deps_cross") {
 }
 
 # Reads the cargo info from Cargo.toml
-deno_cargo_info = exec_script(
-  "../build_extra/rust/get_cargo_info.py",
-  [ rebase_path("Cargo.toml", root_build_dir) ], "json")
+deno_cargo_info = exec_script("../build_extra/rust/get_cargo_info.py",
+                              [ rebase_path("Cargo.toml", root_build_dir) ],
+                              "json")
 
 rust_executable("deno") {
   source_root = "main.rs"
   extern = main_extern
+  extern_rlib = main_extern_rlib
   deps = [
     ":deno_deps",
   ]
@@ -170,6 +189,7 @@ rust_executable("deno") {
 rust_test("cli_test") {
   source_root = "main.rs"
   extern = main_extern
+  extern_rlib = main_extern_rlib
   deps = [
     ":deno_deps",
   ]
@@ -180,7 +200,6 @@ rust_test("cli_test") {
     "Cargo.toml",
   ]
 }
-
 
 # Generates the core TypeScript type library for deno that will be
 # included in the runtime bundle

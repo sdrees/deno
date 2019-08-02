@@ -1,12 +1,14 @@
 union Any {
   Accept,
+  ApplySourceMap,
+  Cache,
   Chdir,
   Chmod,
   Chown,
   Close,
-  CompilerConfig,
-  CompilerConfigRes,
   CopyFile,
+  CreateWorker,
+  CreateWorkerRes,
   Cwd,
   CwdRes,
   Dial,
@@ -14,14 +16,19 @@ union Any {
   EnvironRes,
   Exit,
   Fetch,
-  FetchModuleMetaData,
-  FetchModuleMetaDataRes,
+  FetchSourceFile,
+  FetchSourceFileRes,
   FetchRes,
   FormatError,
   FormatErrorRes,
+  GetRandomValues,
   GlobalTimer,
   GlobalTimerRes,
   GlobalTimerStop,
+  HostGetMessage,
+  HostGetMessageRes,
+  HostGetWorkerClosed,
+  HostPostMessage,
   IsTTY,
   IsTTYRes,
   Kill,
@@ -68,13 +75,9 @@ union Any {
   StatRes,
   Symlink,
   Truncate,
+  HomeDir,
+  HomeDirRes,
   Utime,
-  CreateWorker,
-  CreateWorkerRes,
-  HostGetWorkerClosed,
-  HostGetMessage,
-  HostGetMessageRes,
-  HostPostMessage,
   WorkerGetMessage,
   WorkerGetMessageRes,
   WorkerPostMessage,
@@ -133,9 +136,20 @@ enum ErrorKind: byte {
   // custom errors
   InvalidUri,
   InvalidSeekMode,
-  OpNotAvaiable,
+  OpNotAvailable,
   WorkerInitFailed,
   UnixError,
+  NoAsyncSupport,
+  NoSyncSupport,
+  ImportMapError,
+  InvalidPath,
+  ImportPrefixMissing,
+  UnsupportedFetchScheme,
+  TooManyRedirects,
+
+  // other kinds
+  Diagnostic,
+  JSError,
 }
 
 table Cwd {}
@@ -177,15 +191,6 @@ table StartRes {
   v8_version: string;
   no_color: bool;
   xeval_delim: string;
-}
-
-table CompilerConfig {
-  compiler_type: string;
-}
-
-table CompilerConfigRes {
-  path: string;
-  data: [ubyte];
 }
 
 table FormatError {
@@ -238,19 +243,31 @@ table WorkerPostMessage {
   // data passed thru the zero-copy data parameter.
 }
 
-table FetchModuleMetaData {
+table FetchSourceFile {
   specifier: string;
   referrer: string;
 }
 
-table FetchModuleMetaDataRes {
+table FetchSourceFileRes {
   // If it's a non-http module, moduleName and filename will be the same.
-  // For http modules, moduleName is its resolved http URL, and filename
+  // For http modules, module_name is its resolved http URL, and filename
   // is the location of the locally downloaded source code.
   module_name: string;
   filename: string;
   media_type: MediaType;
   data: [ubyte];
+}
+
+table ApplySourceMap {
+  filename: string;
+  line: int;
+  column: int;
+}
+
+table Cache {
+  extension: string;
+  module_id: string;
+  contents: string;
 }
 
 table Chdir {
@@ -297,7 +314,7 @@ table PermissionsRes {
   write: bool;
   net: bool;
   env: bool;
-  high_precision: bool;
+  hrtime: bool;
 }
 
 // Note this represents The WHOLE header of an http message, not just the key
@@ -435,12 +452,17 @@ table StatRes {
   mode: uint;
   has_mode: bool; // false on windows
   name: string;
-  path: string;
 }
 
 table Truncate {
   name: string;
   len: uint;
+}
+
+table HomeDir {}
+
+table HomeDirRes {
+  path: string;
 }
 
 table Utime {
@@ -535,6 +557,9 @@ table Run {
   stdin: ProcessStdio;
   stdout: ProcessStdio;
   stderr: ProcessStdio;
+  stdin_rid: uint32;
+  stdout_rid: uint32;
+  stderr_rid: uint32;
 }
 
 table RunRes {
@@ -578,5 +603,7 @@ table Seek {
   offset: int;
   whence: uint;
 }
+
+table GetRandomValues {}
 
 root_type Base;

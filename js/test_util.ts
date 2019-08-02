@@ -14,7 +14,10 @@ import {
 } from "./deps/https/deno.land/std/testing/asserts.ts";
 export {
   assert,
-  assertEquals
+  assertEquals,
+  assertNotEquals,
+  assertStrictEq,
+  assertStrContains
 } from "./deps/https/deno.land/std/testing/asserts.ts";
 
 interface TestPermissions {
@@ -23,7 +26,7 @@ interface TestPermissions {
   net?: boolean;
   env?: boolean;
   run?: boolean;
-  highPrecision?: boolean;
+  hrtime?: boolean;
 }
 
 const processPerms = Deno.permissions();
@@ -49,7 +52,7 @@ function permToString(perms: Deno.Permissions): string {
   const n = perms.net ? 1 : 0;
   const e = perms.env ? 1 : 0;
   const u = perms.run ? 1 : 0;
-  const h = perms.highPrecision ? 1 : 0;
+  const h = perms.hrtime ? 1 : 0;
   return `permR${r}W${w}N${n}E${e}U${u}H${h}`;
 }
 
@@ -67,7 +70,7 @@ function normalizeTestPermissions(perms: TestPermissions): Deno.Permissions {
     net: !!perms.net,
     run: !!perms.run,
     env: !!perms.env,
-    highPrecision: !!perms.highPrecision
+    hrtime: !!perms.hrtime
   };
 }
 
@@ -94,7 +97,7 @@ export function test(fn: testing.TestFunction): void {
       net: false,
       env: false,
       run: false,
-      highPrecision: false
+      hrtime: false
     },
     fn
   );
@@ -150,7 +153,7 @@ test(function permissionsMatches(): void {
         net: false,
         env: false,
         run: false,
-        highPrecision: false
+        hrtime: false
       },
       normalizeTestPermissions({ read: true })
     )
@@ -164,7 +167,7 @@ test(function permissionsMatches(): void {
         net: false,
         env: false,
         run: false,
-        highPrecision: false
+        hrtime: false
       },
       normalizeTestPermissions({})
     )
@@ -178,7 +181,7 @@ test(function permissionsMatches(): void {
         net: true,
         env: true,
         run: true,
-        highPrecision: true
+        hrtime: true
       },
       normalizeTestPermissions({ read: true })
     ),
@@ -193,7 +196,7 @@ test(function permissionsMatches(): void {
         net: true,
         env: false,
         run: false,
-        highPrecision: false
+        hrtime: false
       },
       normalizeTestPermissions({ read: true })
     ),
@@ -208,7 +211,7 @@ test(function permissionsMatches(): void {
         net: true,
         env: true,
         run: true,
-        highPrecision: true
+        hrtime: true
       },
       {
         read: true,
@@ -216,7 +219,7 @@ test(function permissionsMatches(): void {
         net: true,
         env: true,
         run: true,
-        highPrecision: true
+        hrtime: true
       }
     )
   );

@@ -1,6 +1,6 @@
 # Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 # Dummy package info required by `cargo fetch`.
-# Use tools/sync_third_party.py to install deps after editing this file.
+# Use tools/sync_rust_crates.py to install deps after editing this file.
 # Deno does not build with cargo. Deno uses a build system called gn.
 # See build_extra/rust/BUILD.gn for the manually built configuration of rust
 # crates.
@@ -12,7 +12,7 @@ path = "main.rs"
 
 [package]
 name = "deno_cli"
-version = "0.5.0"
+version = "0.13.0"
 edition = "2018"
 
 [dependencies]
@@ -21,36 +21,41 @@ deno = { path = "../core" }
 ansi_term = "0.11.0"
 atty = "0.2.11"
 clap = "2.33.0"
-dirs = "1.0.5"
+dirs = "2.0.1"
 flatbuffers = "0.6.0"
 futures = "0.1.27"
 http = "0.1.17"
-hyper = "0.12.28"
+hyper = "0.12.30"
 hyper-rustls = "0.16.1"
+indexmap = "1.0.2"
 integer-atomics = "1.0.2"
 lazy_static = "1.3.0"
-libc = "0.2.54"
+libc = "0.2.58"
 log = "0.4.6"
 rand = "0.6.5"
-regex = "1.1.6"
-remove_dir_all = "0.5.1"
+regex = "1.1.7"
+remove_dir_all = "0.5.2"
 ring = "0.14.6"
-rustyline = "4.0.0"
-serde_json = "1.0.39"
+rustyline = "4.1.0"
+serde = "1.0.92"
+serde_derive = "1.0.92"
+serde_json = { version = "1.0.39", features = [ "preserve_order" ] }
 source-map-mappings = "0.5.0"
-tempfile = "3.0.7"
-tokio = "0.1.19"
+tempfile = "3.0.8"
+termcolor = "1.0.4"
+tokio = "0.1.21"
 tokio-executor = "0.1.7"
 tokio-fs = "0.1.6"
 tokio-io = "0.1.12"
 tokio-process = "0.2.3"
-tokio-rustls = "0.9.2"
+tokio-rustls = "0.9.3"
 tokio-threadpool = "0.1.14"
 url = "1.7.2"
 utime = "0.2.1"
 
 [target.'cfg(windows)'.dependencies]
 winapi = "0.3.7"
+fwdansi = "1.0.1"
 
 [target.'cfg(unix)'.dependencies]
-nix = "0.13.0"
+nix = "0.13.x"

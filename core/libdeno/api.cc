@@ -5,17 +5,12 @@
 #include <iostream>
 #include <string>
 
-// Cpplint bans the use of <mutex> because it duplicates functionality in
-// chromium //base. However Deno doensn't use that, so suppress this lint.
-#include <mutex>  // NOLINT
-
 #include "third_party/v8/include/libplatform/libplatform.h"
 #include "third_party/v8/include/v8.h"
 #include "third_party/v8/src/base/logging.h"
 
 #include "deno.h"
 #include "exceptions.h"
-#include "file_util.h"
 #include "internal.h"
 
 extern "C" {
@@ -57,20 +52,7 @@ Deno* deno_new(deno_config config) {
     params.snapshot_blob = &d->snapshot_;
   }
 
-  v8::Isolate* isolate;
-  {
-#ifdef _WIN32
-    // Work around an apparent V8 bug where initializing multiple isolates
-    // concurrently leads to a crash. At the time of writing the cause of this
-    // crash is not exactly understood, but it seems to be related to the V8
-    // internal function win64_unwindinfo::RegisterNonABICompliantCodeRange(),
-    // which didn't exist in older versions of V8.
-    static std::mutex mutex;
-    std::lock_guard<std::mutex> lock(mutex);
-#endif
-    isolate = v8::Isolate::New(params);
-  }
-
+  v8::Isolate* isolate = v8::Isolate::New(params);
   d->AddIsolate(isolate);
 
   v8::Locker locker(isolate);
@@ -134,6 +116,13 @@ void deno_init() {
     platform = v8::platform::NewDefaultPlatform();
     v8::V8::InitializePlatform(platform.get());
     v8::V8::Initialize();
+    // TODO(ry) This makes WASM compile synchronously. Eventually we should
+    // remove this to make it work asynchronously too. But that requires getting
+    // PumpMessageLoop and RunMicrotasks setup correctly.
+    // See https://github.com/denoland/deno/issues/2544
+    const char* argv[2] = {"", "--no-wasm-async-compilation"};
+    int argc = 2;
+    v8::V8::SetFlagsFromCommandLine(&argc, const_cast<char**>(argv), false);
   }
 }
 
@@ -184,7 +173,6 @@ void deno_respond(Deno* d_, void* user_data, deno_buf buf) {
 
   // Asynchronous response.
   deno::UserDataScope user_data_scope(d, user_data);
-  v8::Locker locker(d->isolate_);
   v8::Isolate::Scope isolate_scope(d->isolate_);
   v8::HandleScope handle_scope(d->isolate_);
 

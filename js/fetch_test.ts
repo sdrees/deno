@@ -33,6 +33,17 @@ testPerm({ net: true }, async function fetchBlob(): Promise<void> {
   assertEquals(blob.size, Number(headers.get("Content-Length")));
 });
 
+testPerm({ net: true }, async function fetchAsyncIterator(): Promise<void> {
+  const response = await fetch("http://localhost:4545/package.json");
+  const headers = response.headers;
+  let total = 0;
+  for await (const chunk of response.body) {
+    total += chunk.length;
+  }
+
+  assertEquals(total, Number(headers.get("Content-Length")));
+});
+
 testPerm({ net: true }, async function responseClone(): Promise<void> {
   const response = await fetch("http://localhost:4545/package.json");
   const response1 = response.clone();
@@ -88,6 +99,32 @@ testPerm(
   }
 );
 
+testPerm({ net: true }, async function fetchWithRedirection(): Promise<void> {
+  const response = await fetch("http://localhost:4546/"); // will redirect to http://localhost:4545/
+  assertEquals(response.status, 200);
+  const body = await response.text();
+  assert(body.includes("<title>Directory listing for /</title>"));
+});
+
+testPerm({ net: true }, async function fetchWithRelativeRedirection(): Promise<
+  void
+> {
+  const response = await fetch("http://localhost:4545/tests"); // will redirect to /tests/
+  assertEquals(response.status, 200);
+  const body = await response.text();
+  assert(body.includes("<title>Directory listing for /tests/</title>"));
+});
+
+// The feature below is not implemented, but the test should work after implementation
+/*
+testPerm({ net: true }, async function fetchWithInfRedirection(): Promise<
+  void
+> {
+  const response = await fetch("http://localhost:4549/tests"); // will redirect to the same place
+  assertEquals(response.status, 0); // network error
+});
+*/
+
 testPerm({ net: true }, async function fetchInitStringBody(): Promise<void> {
   const data = "Hello World";
   const response = await fetch("http://localhost:4545/echo_server", {
@@ -99,7 +136,6 @@ testPerm({ net: true }, async function fetchInitStringBody(): Promise<void> {
   assert(response.headers.get("content-type").startsWith("text/plain"));
 });
 
-/* TODO(ry) Re-enable this test.
 testPerm({ net: true }, async function fetchRequestInitStringBody(): Promise<
   void
 > {
@@ -111,9 +147,7 @@ testPerm({ net: true }, async function fetchRequestInitStringBody(): Promise<
   const response = await fetch(req);
   const text = await response.text();
   assertEquals(text, data);
-  assert(response.headers.get("content-type").startsWith("text/plain"));
 });
-*/
 
 testPerm({ net: true }, async function fetchInitTypedArrayBody(): Promise<
   void

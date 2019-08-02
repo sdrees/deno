@@ -111,7 +111,7 @@ fn test_record_from() {
 
 pub type HttpBenchOp = dyn Future<Item = i32, Error = std::io::Error> + Send;
 
-fn dispatch(control: &[u8], zero_copy_buf: Option<PinnedBuf>) -> Op {
+fn dispatch(control: &[u8], zero_copy_buf: Option<PinnedBuf>) -> CoreOp {
   let record = Record::from(control);
   let is_sync = record.promise_id == 0;
   let http_bench_op = match record.op_id {
@@ -149,11 +149,13 @@ fn dispatch(control: &[u8], zero_copy_buf: Option<PinnedBuf>) -> Op {
       .and_then(move |result| {
         record_a.result = result;
         Ok(record_a)
-      }).or_else(|err| -> Result<Record, ()> {
+      })
+      .or_else(|err| -> Result<Record, ()> {
         eprintln!("unexpected err {}", err);
         record_b.result = -1;
         Ok(record_b)
-      }).then(|result| -> Result<Buf, ()> {
+      })
+      .then(|result| -> Result<Buf, ()> {
         let record = result.unwrap();
         Ok(record.into())
       }),
@@ -179,9 +181,8 @@ fn main() {
       filename: "http_bench.js",
     });
 
-    let mut config = deno::Config::default();
-    config.dispatch(dispatch);
-    let isolate = deno::Isolate::new(startup_data, config);
+    let mut isolate = deno::Isolate::new(startup_data, false);
+    isolate.set_dispatch(dispatch);
 
     isolate.then(|r| {
       js_check(r);
@@ -235,7 +236,8 @@ fn op_accept(listener_rid: i32) -> Box<HttpBenchOp> {
         Some(Repr::TcpListener(ref mut listener)) => listener.poll_accept(),
         _ => panic!("bad rid {}", listener_rid),
       }
-    }).and_then(move |(stream, addr)| {
+    })
+    .and_then(move |(stream, addr)| {
       debug!("accept success {}", addr);
       let rid = new_rid();
 
@@ -284,7 +286,8 @@ fn op_read(rid: i32, zero_copy_buf: Option<PinnedBuf>) -> Box<HttpBenchOp> {
         }
         _ => panic!("bad rid"),
       }
-    }).and_then(move |nread| {
+    })
+    .and_then(move |nread| {
       debug!("read success {}", nread);
       Ok(nread as i32)
     }),
@@ -304,14 +307,15 @@ fn op_write(rid: i32, zero_copy_buf: Option<PinnedBuf>) -> Box<HttpBenchOp> {
         }
         _ => panic!("bad rid"),
       }
-    }).and_then(move |nwritten| {
+    })
+    .and_then(move |nwritten| {
       debug!("write success {}", nwritten);
       Ok(nwritten as i32)
     }),
   )
 }
 
-fn js_check(r: Result<(), JSError>) {
+fn js_check(r: Result<(), ErrBox>) {
   if let Err(e) = r {
     panic!(e.to_string());
   }

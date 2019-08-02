@@ -36,7 +36,7 @@ not to introduce circular imports.
 
 Example: Instead of `file-server.ts` use `file_server.ts`.
 
-## Format code according using prettier.
+## Format code using prettier.
 
 More specifically, code should be wrapped at 80 columns and use 2-space
 indentation and use camel-case. Use `//format.ts` to invoke prettier.
@@ -174,9 +174,9 @@ limited to closures.
 Bad
 
 ```ts
-export const foo(): string => {
+export const foo = (): string => {
   return "bar";
-}
+};
 ```
 
 Good
@@ -289,8 +289,8 @@ test myTestFunction ... ok
 Example of test:
 
 ```ts
-import { assertEquals } from "https://deno.land/std@v0.3.1/testing/asserts.ts";
-import { test } from "https://deno.land/std@v0.3.1/testing/mod.ts";
+import { assertEquals } from "https://deno.land/std@v0.11/testing/asserts.ts";
+import { test } from "https://deno.land/std@v0.11/testing/mod.ts";
 import { foo } from "./mod.ts";
 
 test(function myTestFunction() {

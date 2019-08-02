@@ -3,6 +3,7 @@ import { assert } from "./util";
 import * as msg from "gen/cli/msg_generated";
 import * as flatbuffers from "./flatbuffers";
 import { sendAsync, sendSync } from "./dispatch";
+import { window } from "./window";
 
 interface Timer {
   id: number;
@@ -180,14 +181,20 @@ function fireTimers(): void {
 
 export type Args = unknown[];
 
+function checkThis(thisArg: unknown): void {
+  if (thisArg !== null && thisArg !== undefined && thisArg !== window) {
+    throw new TypeError("Illegal invocation");
+  }
+}
+
 function setTimer(
   cb: (...args: Args) => void,
   delay: number,
   args: Args,
   repeat: boolean
 ): number {
-  // If any `args` were provided (which is uncommon), bind them to the callback.
-  const callback: () => void = args.length === 0 ? cb : cb.bind(null, ...args);
+  // Bind `args` to the callback and bind `this` to window(global).
+  const callback: () => void = cb.bind(window, ...args);
   // In the browser, the delay value must be coercible to an integer between 0
   // and INT32_MAX. Any other value will cause the timer to fire immediately.
   // We emulate this behavior.
@@ -222,23 +229,28 @@ function setTimer(
 /** Sets a timer which executes a function once after the timer expires. */
 export function setTimeout(
   cb: (...args: Args) => void,
-  delay: number,
+  delay: number = 0,
   ...args: Args
 ): number {
+  // @ts-ignore
+  checkThis(this);
   return setTimer(cb, delay, args, false);
 }
 
 /** Repeatedly calls a function , with a fixed time delay between each call. */
 export function setInterval(
   cb: (...args: Args) => void,
-  delay: number,
+  delay: number = 0,
   ...args: Args
 ): number {
+  // @ts-ignore
+  checkThis(this);
   return setTimer(cb, delay, args, true);
 }
 
 /** Clears a previously set timer by id. AKA clearTimeout and clearInterval. */
-export function clearTimer(id: number): void {
+function clearTimer(id: number): void {
+  id = Number(id);
   const timer = idMap.get(id);
   if (timer === undefined) {
     // Timer doesn't exist any more or never existed. This is not an error.
@@ -247,4 +259,18 @@ export function clearTimer(id: number): void {
   // Unschedule the timer if it is currently scheduled, and forget about it.
   unschedule(timer);
   idMap.delete(timer.id);
+}
+
+export function clearTimeout(id: number = 0): void {
+  if (id === 0) {
+    return;
+  }
+  clearTimer(id);
+}
+
+export function clearInterval(id: number = 0): void {
+  if (id === 0) {
+    return;
+  }
+  clearTimer(id);
 }

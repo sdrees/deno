@@ -10,6 +10,7 @@
 import { window } from "./window";
 import * as blob from "./blob";
 import * as consoleTypes from "./console";
+import * as csprng from "./get_random_values";
 import * as customEvent from "./custom_event";
 import * as deno from "./deno";
 import * as domTypes from "./dom_types";
@@ -27,7 +28,6 @@ import * as workers from "./workers";
 import * as performanceUtil from "./performance";
 
 import * as request from "./request";
-//import * as response from "./response";
 
 // These imports are not exposed and therefore are fine to just import the
 // symbols required.
@@ -40,6 +40,29 @@ import { immutableDefine } from "./util";
 declare global {
   const console: consoleTypes.Console;
   const setTimeout: typeof timers.setTimeout;
+
+  interface CallSite {
+    getThis(): unknown;
+    getTypeName(): string;
+    getFunction(): Function;
+    getFunctionName(): string;
+    getMethodName(): string;
+    getFileName(): string;
+    getLineNumber(): number | null;
+    getColumnNumber(): number | null;
+    getEvalOrigin(): string | null;
+    isToplevel(): boolean;
+    isEval(): boolean;
+    isNative(): boolean;
+    isConstructor(): boolean;
+    isAsync(): boolean;
+    isPromiseAll(): boolean;
+    getPromiseIndex(): number | null;
+  }
+
+  interface ErrorConstructor {
+    prepareStackTrace(error: Error, structuredStackTrace: CallSite[]): string;
+  }
 }
 
 // A self reference to the global object.
@@ -51,24 +74,21 @@ window.window = window;
 immutableDefine(window, "Deno", deno);
 Object.freeze(window.Deno);
 
-// ref https://console.spec.whatwg.org/#console-namespace
-// For historical web-compatibility reasons, the namespace object for
-// console must have as its [[Prototype]] an empty object, created as if
-// by ObjectCreate(%ObjectPrototype%), instead of %ObjectPrototype%.
-let console = Object.create({}) as consoleTypes.Console;
-Object.assign(console, new consoleTypes.Console(core.print));
-console[consoleTypes.isConsoleInstance] = true;
-
 // Globally available functions and object instances.
 window.atob = textEncoding.atob;
 window.btoa = textEncoding.btoa;
 window.fetch = fetchTypes.fetch;
-window.clearTimeout = timers.clearTimer;
-window.clearInterval = timers.clearTimer;
-window.console = console;
+window.clearTimeout = timers.clearTimeout;
+window.clearInterval = timers.clearInterval;
+window.console = new consoleTypes.Console(core.print);
 window.setTimeout = timers.setTimeout;
 window.setInterval = timers.setInterval;
 window.location = (undefined as unknown) as domTypes.Location;
+window.onload = undefined as undefined | Function;
+// The following Crypto interface implementation is not up to par with the
+// standard https://www.w3.org/TR/WebCryptoAPI/#crypto-interface as it does not
+// yet incorporate the SubtleCrypto interface as its "subtle" property.
+window.crypto = (csprng as unknown) as Crypto;
 
 // When creating the runtime type library, we use modifications to `window` to
 // determine what is in the global namespace.  When we put a class in the
@@ -90,6 +110,8 @@ window.EventInit = event.EventInit;
 export type EventInit = event.EventInit;
 window.Event = event.Event;
 export type Event = event.Event;
+window.EventListener = eventTarget.EventListener;
+export type EventListener = eventTarget.EventListener;
 window.EventTarget = eventTarget.EventTarget;
 export type EventTarget = eventTarget.EventTarget;
 window.URL = url.URL;
@@ -110,11 +132,11 @@ export type TextEncoder = textEncoding.TextEncoder;
 window.TextDecoder = textEncoding.TextDecoder;
 export type TextDecoder = textEncoding.TextDecoder;
 
-window.Request = request.Request;
-export type Request = request.Request;
+window.Request = request.Request as domTypes.RequestConstructor;
+export type Request = domTypes.Request;
 
-//window.Response = response.Response;
-//export type Response = response.Response;
+window.Response = fetchTypes.Response;
+export type Response = domTypes.Response;
 
 window.performance = new performanceUtil.Performance();
 
@@ -129,9 +151,47 @@ window.postMessage = workers.postMessage;
 window.Worker = workers.WorkerImpl;
 export type Worker = workers.Worker;
 
+window[domTypes.eventTargetHost] = null;
+window[domTypes.eventTargetListeners] = {};
+window[domTypes.eventTargetMode] = "";
+window[domTypes.eventTargetNodeType] = 0;
+window[eventTarget.eventTargetAssignedSlot] = false;
+window[eventTarget.eventTargetHasActivationBehavior] = false;
+window.addEventListener = eventTarget.EventTarget.prototype.addEventListener;
+window.dispatchEvent = eventTarget.EventTarget.prototype.dispatchEvent;
+window.removeEventListener =
+  eventTarget.EventTarget.prototype.removeEventListener;
+
+// Registers the handler for window.onload function.
+window.addEventListener(
+  "load",
+  (e: domTypes.Event): void => {
+    const onload = window.onload;
+    if (typeof onload === "function") {
+      onload(e);
+    }
+  }
+);
+
 // below are interfaces that are available in TypeScript but
 // have different signatures
 export interface ImportMeta {
   url: string;
   main: boolean;
+}
+
+export interface Crypto {
+  readonly subtle: null;
+  getRandomValues: <
+    T extends
+      | Int8Array
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int16Array
+      | Uint16Array
+      | Int32Array
+      | Uint32Array
+  >(
+    typedArray: T
+  ) => T;
 }

@@ -1,15 +1,21 @@
 # Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
+import collections
 import os
 import re
 import shutil
+import select
 import stat
 import sys
 import subprocess
 import tempfile
+import time
 
-RESET = "\x1b[0m"
-FG_RED = "\x1b[31m"
-FG_GREEN = "\x1b[32m"
+if os.environ.get("NO_COLOR", None):
+    RESET = FG_READ = FG_GREEN = ""
+else:
+    RESET = "\x1b[0m"
+    FG_RED = "\x1b[31m"
+    FG_GREEN = "\x1b[32m"
 
 executable_suffix = ".exe" if os.name == "nt" else ""
 root_path = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -54,7 +60,15 @@ def run(args, quiet=False, cwd=None, env=None, merge_env=None):
         sys.exit(rc)
 
 
-def run_output(args, quiet=False, cwd=None, env=None, merge_env=None):
+CmdResult = collections.namedtuple('CmdResult', ['out', 'err', 'code'])
+
+
+def run_output(args,
+               quiet=False,
+               cwd=None,
+               env=None,
+               merge_env=None,
+               exit_on_fail=False):
     if merge_env is None:
         merge_env = {}
     args[0] = os.path.normpath(args[0])
@@ -62,7 +76,25 @@ def run_output(args, quiet=False, cwd=None, env=None, merge_env=None):
         print " ".join(args)
     env = make_env(env=env, merge_env=merge_env)
     shell = os.name == "nt"  # Run through shell to make .bat/.cmd files work.
-    return subprocess.check_output(args, cwd=cwd, env=env, shell=shell)
+    p = subprocess.Popen(
+        args,
+        cwd=cwd,
+        env=env,
+        shell=shell,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE)
+    try:
+        out, err = p.communicate()
+    except subprocess.CalledProcessError as e:
+        p.kill()
+        p.wait()
+        raise e
+    retcode = p.poll()
+    if retcode and exit_on_fail:
+        sys.exit(retcode)
+    # Ignore Windows CRLF (\r\n).
+    return CmdResult(
+        out.replace('\r\n', '\n'), err.replace('\r\n', '\n'), retcode)
 
 
 def shell_quote_win(arg):
@@ -83,14 +115,6 @@ def shell_quote(arg):
         # Python 2 has posix shell quoting built in, albeit in a weird place.
         from pipes import quote
         return quote(arg)
-
-
-def red_failed():
-    return "%sFAILED%s" % (FG_RED, RESET)
-
-
-def green_ok():
-    return "%sok%s" % (FG_GREEN, RESET)
 
 
 def symlink(target, name, target_is_dir=False):
@@ -176,6 +200,8 @@ def rmtree(directory):
 def build_mode(default="debug"):
     if "DENO_BUILD_MODE" in os.environ:
         return os.environ["DENO_BUILD_MODE"]
+    elif "--release" in sys.argv:
+        return "release"
     else:
         return default
 
@@ -191,8 +217,6 @@ def build_path():
 # Returns True if the expected matches the actual output, allowing variation
 # from actual where expected has the wildcard (e.g. matches /.*/)
 def pattern_match(pattern, string, wildcard="[WILDCARD]"):
-    if len(pattern) == 0:
-        return string == 0
     if pattern == wildcard:
         return True
 
@@ -360,7 +384,7 @@ def parse_wrk_output(output):
                                                   line)
         if stats['max_latency'] is None:
             stats['max_latency'] = extract_max_latency_in_milliseconds(
-                r'Latency(?:\s+(\d+.\d+)([a-z]+)){3}', line)
+                r'\s+99%(?:\s+(\d+.\d+)([a-z]+))', line)
     return stats
 
 
@@ -374,3 +398,40 @@ def mkdtemp():
     # 'TS5009: Cannot find the common subdirectory path for the input files.'
     temp_dir = os.environ["TEMP"] if os.name == 'nt' else None
     return tempfile.mkdtemp(dir=temp_dir)
+
+
+# This function is copied from:
+# https://gist.github.com/hayd/4f46a68fc697ba8888a7b517a414583e
+# https://stackoverflow.com/q/52954248/1240268
+def tty_capture(cmd, bytes_input, timeout=5):
+    """Capture the output of cmd with bytes_input to stdin,
+    with stdin, stdout and stderr as TTYs."""
+    # pty is not available on windows, so we import it within this function.
+    import pty
+    mo, so = pty.openpty()  # provide tty to enable line-buffering
+    me, se = pty.openpty()
+    mi, si = pty.openpty()
+    fdmap = {mo: 'stdout', me: 'stderr', mi: 'stdin'}
+
+    timeout_exact = time.time() + timeout
+    p = subprocess.Popen(
+        cmd, bufsize=1, stdin=si, stdout=so, stderr=se, close_fds=True)
+    os.write(mi, bytes_input)
+
+    select_timeout = .04  #seconds
+    res = {'stdout': b'', 'stderr': b''}
+    while True:
+        ready, _, _ = select.select([mo, me], [], [], select_timeout)
+        if ready:
+            for fd in ready:
+                data = os.read(fd, 512)
+                if not data:
+                    break
+                res[fdmap[fd]] += data
+        elif p.poll() is not None or time.time(
+        ) > timeout_exact:  # select timed-out
+            break  # p exited
+    for fd in [si, so, se, mi, mo, me]:
+        os.close(fd)  # can't do it sooner: it leads to errno.EIO error
+    p.wait()
+    return p.returncode, res['stdout'], res['stderr']

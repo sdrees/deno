@@ -1,35 +1,39 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
-use atty;
 use crate::ansi;
-use crate::compiler::get_compiler_config;
-use crate::deno_dir::resolve_path;
+use crate::deno_error;
+use crate::deno_error::DenoError;
+use crate::deno_error::ErrorKind;
+use crate::deno_error::GetErrorKind;
 use crate::dispatch_minimal::dispatch_minimal;
 use crate::dispatch_minimal::parse_min_record;
-use crate::errors;
-use crate::errors::{DenoError, DenoResult, ErrorKind};
+use crate::fmt_errors::JSError;
 use crate::fs as deno_fs;
 use crate::http_util;
-use crate::js_errors::apply_source_map;
-use crate::js_errors::JSErrorColor;
 use crate::msg;
 use crate::msg_util;
+use crate::rand;
 use crate::repl;
 use crate::resolve_addr::resolve_addr;
 use crate::resources;
 use crate::resources::table_entries;
 use crate::resources::Resource;
 use crate::signal::kill;
+use crate::source_maps::get_orig_position;
+use crate::source_maps::CachedMaps;
 use crate::startup_data;
 use crate::state::ThreadSafeState;
 use crate::tokio_util;
 use crate::tokio_write;
 use crate::version;
-use crate::worker::root_specifier_to_url;
 use crate::worker::Worker;
-use deno::js_check;
+use atty;
 use deno::Buf;
-use deno::JSError;
+use deno::CoreOp;
+use deno::ErrBox;
+use deno::Loader;
+use deno::ModuleSpecifier;
 use deno::Op;
+use deno::OpResult;
 use deno::PinnedBuf;
 use flatbuffers::FlatBufferBuilder;
 use futures;
@@ -39,8 +43,11 @@ use futures::Sink;
 use futures::Stream;
 use hyper;
 use hyper::rt::Future;
+use log;
+use rand::{thread_rng, Rng};
 use remove_dir_all::remove_dir_all;
 use std;
+use std::collections::HashMap;
 use std::convert::From;
 use std::fs;
 use std::net::Shutdown;
@@ -52,6 +59,7 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio_process::CommandExt;
 use tokio_threadpool;
+use url::Url;
 use utime;
 
 #[cfg(unix)]
@@ -59,17 +67,15 @@ use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 
-type OpResult = DenoResult<Buf>;
+type CliOpResult = OpResult<ErrBox>;
 
-pub type OpWithError = dyn Future<Item = Buf, Error = DenoError> + Send;
+type CliDispatchFn = fn(
+  state: &ThreadSafeState,
+  base: &msg::Base<'_>,
+  data: Option<PinnedBuf>,
+) -> CliOpResult;
 
-// TODO Ideally we wouldn't have to box the OpWithError being returned.
-// The box is just to make it easier to get a prototype refactor working.
-type OpCreator =
-  fn(state: &ThreadSafeState, base: &msg::Base<'_>, data: Option<PinnedBuf>)
-    -> Box<OpWithError>;
-
-pub type OpSelector = fn(inner_type: msg::Any) -> Option<OpCreator>;
+pub type OpSelector = fn(inner_type: msg::Any) -> Option<CliDispatchFn>;
 
 #[inline]
 fn empty_buf() -> Buf {
@@ -81,7 +87,7 @@ pub fn dispatch_all(
   control: &[u8],
   zero_copy: Option<PinnedBuf>,
   op_selector: OpSelector,
-) -> Op {
+) -> CoreOp {
   let bytes_sent_control = control.len();
   let bytes_sent_zero_copy = zero_copy.as_ref().map(|b| b.len()).unwrap_or(0);
   let op = if let Some(min_record) = parse_min_record(control) {
@@ -102,29 +108,81 @@ pub fn dispatch_all_legacy(
   control: &[u8],
   zero_copy: Option<PinnedBuf>,
   op_selector: OpSelector,
-) -> Op {
+) -> CoreOp {
   let base = msg::get_root_as_base(&control);
-  let is_sync = base.sync();
   let inner_type = base.inner_type();
+  let is_sync = base.sync();
   let cmd_id = base.cmd_id();
 
-  let op_func: OpCreator = match op_selector(inner_type) {
+  debug!(
+    "msg_from_js {} sync {}",
+    msg::enum_name_any(inner_type),
+    is_sync
+  );
+
+  let op_func: CliDispatchFn = match op_selector(inner_type) {
     Some(v) => v,
     None => panic!("Unhandled message {}", msg::enum_name_any(inner_type)),
   };
 
-  let op: Box<OpWithError> = op_func(state, &base, zero_copy);
+  let op_result = op_func(state, &base, zero_copy);
 
   let state = state.clone();
 
-  let fut = Box::new(
-    op.or_else(move |err: DenoError| -> Result<Buf, ()> {
+  match op_result {
+    Ok(Op::Sync(buf)) => {
+      state.metrics_op_completed(buf.len());
+      Op::Sync(buf)
+    }
+    Ok(Op::Async(fut)) => {
+      let result_fut = Box::new(
+        fut
+          .or_else(move |err: ErrBox| -> Result<Buf, ()> {
+            debug!("op err {}", err);
+            // No matter whether we got an Err or Ok, we want a serialized message to
+            // send back. So transform the DenoError into a Buf.
+            let builder = &mut FlatBufferBuilder::new();
+            let errmsg_offset = builder.create_string(&format!("{}", err));
+            Ok(serialize_response(
+              cmd_id,
+              builder,
+              msg::BaseArgs {
+                error: Some(errmsg_offset),
+                error_kind: err.kind(),
+                ..Default::default()
+              },
+            ))
+          })
+          .and_then(move |buf: Buf| -> Result<Buf, ()> {
+            // Handle empty responses. For sync responses we just want
+            // to send null. For async we want to send a small message
+            // with the cmd_id.
+            let buf = if buf.len() > 0 {
+              buf
+            } else {
+              let builder = &mut FlatBufferBuilder::new();
+              serialize_response(
+                cmd_id,
+                builder,
+                msg::BaseArgs {
+                  ..Default::default()
+                },
+              )
+            };
+            state.metrics_op_completed(buf.len());
+            Ok(buf)
+          })
+          .map_err(|err| panic!("unexpected error {:?}", err)),
+      );
+      Op::Async(result_fut)
+    }
+    Err(err) => {
       debug!("op err {}", err);
       // No matter whether we got an Err or Ok, we want a serialized message to
       // send back. So transform the DenoError into a Buf.
       let builder = &mut FlatBufferBuilder::new();
       let errmsg_offset = builder.create_string(&format!("{}", err));
-      Ok(serialize_response(
+      let response_buf = serialize_response(
         cmd_id,
         builder,
         msg::BaseArgs {
@@ -132,71 +190,38 @@ pub fn dispatch_all_legacy(
           error_kind: err.kind(),
           ..Default::default()
         },
-      ))
-    }).and_then(move |buf: Buf| -> Result<Buf, ()> {
-      // Handle empty responses. For sync responses we just want
-      // to send null. For async we want to send a small message
-      // with the cmd_id.
-      let buf = if is_sync || buf.len() > 0 {
-        buf
-      } else {
-        let builder = &mut FlatBufferBuilder::new();
-        serialize_response(
-          cmd_id,
-          builder,
-          msg::BaseArgs {
-            ..Default::default()
-          },
-        )
-      };
-      state.metrics_op_completed(buf.len());
-      Ok(buf)
-    }).map_err(|err| panic!("unexpected error {:?}", err)),
-  );
-
-  debug!(
-    "msg_from_js {} sync {}",
-    msg::enum_name_any(inner_type),
-    base.sync()
-  );
-
-  if base.sync() {
-    Op::Sync(fut.wait().unwrap())
-  } else {
-    Op::Async(fut)
-  }
-}
-
-pub fn op_selector_compiler(inner_type: msg::Any) -> Option<OpCreator> {
-  match inner_type {
-    msg::Any::CompilerConfig => Some(op_compiler_config),
-    msg::Any::Cwd => Some(op_cwd),
-    msg::Any::FetchModuleMetaData => Some(op_fetch_module_meta_data),
-    msg::Any::WorkerGetMessage => Some(op_worker_get_message),
-    msg::Any::WorkerPostMessage => Some(op_worker_post_message),
-    msg::Any::Exit => Some(op_exit),
-    msg::Any::Start => Some(op_start),
-    _ => None,
+      );
+      state.metrics_op_completed(response_buf.len());
+      Op::Sync(response_buf)
+    }
   }
 }
 
 /// Standard ops set for most isolates
-pub fn op_selector_std(inner_type: msg::Any) -> Option<OpCreator> {
+pub fn op_selector_std(inner_type: msg::Any) -> Option<CliDispatchFn> {
   match inner_type {
     msg::Any::Accept => Some(op_accept),
+    msg::Any::ApplySourceMap => Some(op_apply_source_map),
+    msg::Any::Cache => Some(op_cache),
     msg::Any::Chdir => Some(op_chdir),
     msg::Any::Chmod => Some(op_chmod),
     msg::Any::Chown => Some(op_chown),
     msg::Any::Close => Some(op_close),
     msg::Any::CopyFile => Some(op_copy_file),
+    msg::Any::CreateWorker => Some(op_create_worker),
     msg::Any::Cwd => Some(op_cwd),
     msg::Any::Dial => Some(op_dial),
     msg::Any::Environ => Some(op_env),
     msg::Any::Exit => Some(op_exit),
     msg::Any::Fetch => Some(op_fetch),
+    msg::Any::FetchSourceFile => Some(op_fetch_source_file),
     msg::Any::FormatError => Some(op_format_error),
+    msg::Any::GetRandomValues => Some(op_get_random_values),
     msg::Any::GlobalTimer => Some(op_global_timer),
     msg::Any::GlobalTimerStop => Some(op_global_timer_stop),
+    msg::Any::HostGetMessage => Some(op_host_get_message),
+    msg::Any::HostGetWorkerClosed => Some(op_host_get_worker_closed),
+    msg::Any::HostPostMessage => Some(op_host_post_message),
     msg::Any::IsTTY => Some(op_is_tty),
     msg::Any::Kill => Some(op_kill),
     msg::Any::Link => Some(op_link),
@@ -225,11 +250,8 @@ pub fn op_selector_std(inner_type: msg::Any) -> Option<OpCreator> {
     msg::Any::Stat => Some(op_stat),
     msg::Any::Symlink => Some(op_symlink),
     msg::Any::Truncate => Some(op_truncate),
+    msg::Any::HomeDir => Some(op_home_dir),
     msg::Any::Utime => Some(op_utime),
-    msg::Any::CreateWorker => Some(op_create_worker),
-    msg::Any::HostGetWorkerClosed => Some(op_host_get_worker_closed),
-    msg::Any::HostGetMessage => Some(op_host_get_message),
-    msg::Any::HostPostMessage => Some(op_host_post_message),
     msg::Any::Write => Some(op_write),
 
     // TODO(ry) split these out so that only the appropriate Workers can access
@@ -249,7 +271,7 @@ fn op_now(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let seconds = state.start_time.elapsed().as_secs();
   let mut subsec_nanos = state.start_time.elapsed().subsec_nanos();
@@ -258,7 +280,7 @@ fn op_now(
   // If the permission is not enabled
   // Round the nano result on 2 milliseconds
   // see: https://developer.mozilla.org/en-US/docs/Web/API/DOMHighResTimeStamp#Reduced_time_precision
-  if !state.permissions.allows_high_precision() {
+  if !state.permissions.allows_hrtime() {
     subsec_nanos -= subsec_nanos % reduced_time_precision
   }
 
@@ -270,7 +292,8 @@ fn op_now(
       subsec_nanos,
     },
   );
-  ok_future(serialize_response(
+
+  ok_buf(serialize_response(
     base.cmd_id(),
     builder,
     msg::BaseArgs {
@@ -285,7 +308,7 @@ fn op_is_tty(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   _data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let builder = &mut FlatBufferBuilder::new();
   let inner = msg::IsTTYRes::create(
     builder,
@@ -295,7 +318,7 @@ fn op_is_tty(
       stderr: atty::is(atty::Stream::Stderr),
     },
   );
-  ok_future(serialize_response(
+  ok_buf(serialize_response(
     base.cmd_id(),
     builder,
     msg::BaseArgs {
@@ -310,7 +333,7 @@ fn op_exit(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   _data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let inner = base.inner_as_exit().unwrap();
   std::process::exit(inner.code())
 }
@@ -319,7 +342,7 @@ fn op_start(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let mut builder = FlatBufferBuilder::new();
 
@@ -331,8 +354,12 @@ fn op_start(
   let cwd_off =
     builder.create_string(deno_fs::normalize_path(cwd_path.as_ref()).as_ref());
 
+  let current_exe = std::env::current_exe().unwrap();
+  // Now apply URL parser to current exe to get fully resolved path, otherwise we might get
+  // `./` and `../` bits in `exec_path`
+  let exe_url = Url::from_file_path(current_exe).unwrap();
   let exec_path =
-    builder.create_string(std::env::current_exe().unwrap().to_str().unwrap());
+    builder.create_string(exe_url.to_file_path().unwrap().to_str().unwrap());
 
   let v8_version = version::v8();
   let v8_version_off = builder.create_string(v8_version);
@@ -340,13 +367,20 @@ fn op_start(
   let deno_version = version::DENO;
   let deno_version_off = builder.create_string(deno_version);
 
-  let main_module = state.main_module().map(|m| builder.create_string(&m));
+  let main_module = state
+    .main_module()
+    .map(|m| builder.create_string(&m.to_string()));
 
   let xeval_delim = state
     .flags
     .xeval_delim
     .clone()
     .map(|m| builder.create_string(&m));
+
+  let debug_flag = state
+    .flags
+    .log_level
+    .map_or(false, |l| l == log::Level::Debug);
 
   let inner = msg::StartRes::create(
     &mut builder,
@@ -355,7 +389,7 @@ fn op_start(
       pid: std::process::id(),
       argv: Some(argv_off),
       main_module,
-      debug_flag: state.flags.log_debug,
+      debug_flag,
       version_flag: state.flags.version,
       v8_version: Some(v8_version_off),
       deno_version: Some(deno_version_off),
@@ -366,7 +400,7 @@ fn op_start(
     },
   );
 
-  ok_future(serialize_response(
+  ok_buf(serialize_response(
     base.cmd_id(),
     &mut builder,
     msg::BaseArgs {
@@ -381,17 +415,15 @@ fn op_format_error(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_format_error().unwrap();
-  let orig_error = String::from(inner.error().unwrap());
-
-  let js_error = JSError::from_v8_exception(&orig_error).unwrap();
-  let js_error_mapped = apply_source_map(&js_error, &state.dir);
-  let js_error_string = JSErrorColor(&js_error_mapped).to_string();
+  let json_str = inner.error().unwrap();
+  let error = JSError::from_json(json_str, &state.ts_compiler);
+  let error_string = error.to_string();
 
   let mut builder = FlatBufferBuilder::new();
-  let new_error = builder.create_string(&js_error_string);
+  let new_error = builder.create_string(&error_string);
 
   let inner = msg::FormatErrorRes::create(
     &mut builder,
@@ -400,7 +432,7 @@ fn op_format_error(
     },
   );
 
-  ok_future(serialize_response(
+  let response_buf = serialize_response(
     base.cmd_id(),
     &mut builder,
     msg::BaseArgs {
@@ -408,7 +440,9 @@ fn op_format_error(
       inner: Some(inner.as_union_value()),
       ..Default::default()
     },
-  ))
+  );
+
+  ok_buf(response_buf)
 }
 
 fn serialize_response(
@@ -425,127 +459,164 @@ fn serialize_response(
 }
 
 #[inline]
-pub fn ok_future(buf: Buf) -> Box<OpWithError> {
-  Box::new(futures::future::ok(buf))
+pub fn ok_future(buf: Buf) -> CliOpResult {
+  Ok(Op::Async(Box::new(futures::future::ok(buf))))
 }
 
-// Shout out to Earl Sweatshirt.
 #[inline]
-pub fn odd_future(err: DenoError) -> Box<OpWithError> {
-  Box::new(futures::future::err(err))
+pub fn ok_buf(buf: Buf) -> CliOpResult {
+  Ok(Op::Sync(buf))
 }
 
-// https://github.com/denoland/deno/blob/golang/os.go#L100-L154
-fn op_fetch_module_meta_data(
+fn op_cache(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
-  let inner = base.inner_as_fetch_module_meta_data().unwrap();
+  let inner = base.inner_as_cache().unwrap();
+  let extension = inner.extension().unwrap();
+  // TODO: rename to something with 'url'
+  let module_id = inner.module_id().unwrap();
+  let contents = inner.contents().unwrap();
+
+  let module_specifier = ModuleSpecifier::resolve_url(module_id)
+    .expect("Should be valid module specifier");
+
+  state.ts_compiler.cache_compiler_output(
+    &module_specifier,
+    extension,
+    contents,
+  )?;
+
+  ok_buf(empty_buf())
+}
+
+// https://github.com/denoland/deno/blob/golang/os.go#L100-L154
+fn op_fetch_source_file(
+  state: &ThreadSafeState,
+  base: &msg::Base<'_>,
+  data: Option<PinnedBuf>,
+) -> CliOpResult {
+  if !base.sync() {
+    return Err(deno_error::no_async_support());
+  }
+  assert!(data.is_none());
+  let inner = base.inner_as_fetch_source_file().unwrap();
   let cmd_id = base.cmd_id();
   let specifier = inner.specifier().unwrap();
   let referrer = inner.referrer().unwrap();
 
-  assert_eq!(state.dir.root.join("gen"), state.dir.gen, "Sanity check");
+  let resolved_specifier = state.resolve(specifier, referrer, false)?;
 
-  let use_cache = !state.flags.reload;
-  let no_fetch = state.flags.no_fetch;
+  let fut = state
+    .file_fetcher
+    .fetch_source_file_async(&resolved_specifier)
+    .and_then(move |out| {
+      let builder = &mut FlatBufferBuilder::new();
+      let data_off = builder.create_vector(out.source_code.as_slice());
+      let msg_args = msg::FetchSourceFileResArgs {
+        module_name: Some(builder.create_string(&out.url.to_string())),
+        filename: Some(builder.create_string(&out.filename.to_str().unwrap())),
+        media_type: out.media_type,
+        data: Some(data_off),
+      };
+      let inner = msg::FetchSourceFileRes::create(builder, &msg_args);
+      Ok(serialize_response(
+        cmd_id,
+        builder,
+        msg::BaseArgs {
+          inner: Some(inner.as_union_value()),
+          inner_type: msg::Any::FetchSourceFileRes,
+          ..Default::default()
+        },
+      ))
+    });
 
-  Box::new(futures::future::result(|| -> OpResult {
-    let builder = &mut FlatBufferBuilder::new();
-    // TODO(ry) Use fetch_module_meta_data_async.
-    let out = state
-      .dir
-      .fetch_module_meta_data(specifier, referrer, use_cache, no_fetch)?;
-    let data_off = builder.create_vector(out.source_code.as_slice());
-    let msg_args = msg::FetchModuleMetaDataResArgs {
-      module_name: Some(builder.create_string(&out.module_name)),
-      filename: Some(builder.create_string(&out.filename)),
-      media_type: out.media_type,
-      data: Some(data_off),
-    };
-    let inner = msg::FetchModuleMetaDataRes::create(builder, &msg_args);
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        inner: Some(inner.as_union_value()),
-        inner_type: msg::Any::FetchModuleMetaDataRes,
-        ..Default::default()
-      },
-    ))
-  }()))
+  // WARNING: Here we use tokio_util::block_on() which starts a new Tokio
+  // runtime for executing the future. This is so we don't inadvernently run
+  // out of threads in the main runtime.
+  let result_buf = tokio_util::block_on(fut)?;
+  Ok(Op::Sync(result_buf))
 }
 
-/// Retrieve any relevant compiler configuration.
-fn op_compiler_config(
+fn op_apply_source_map(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
+  if !base.sync() {
+    return Err(deno_error::no_async_support());
+  }
   assert!(data.is_none());
-  let inner = base.inner_as_compiler_config().unwrap();
+  let inner = base.inner_as_apply_source_map().unwrap();
   let cmd_id = base.cmd_id();
-  let compiler_type = inner.compiler_type().unwrap();
+  let filename = inner.filename().unwrap();
+  let line = inner.line();
+  let column = inner.column();
 
-  Box::new(futures::future::result(|| -> OpResult {
-    let builder = &mut FlatBufferBuilder::new();
-    let (path, out) = match get_compiler_config(state, compiler_type) {
-      Some(val) => val,
-      _ => ("".to_owned(), vec![]),
-    };
-    let data_off = builder.create_vector(&out);
-    let msg_args = msg::CompilerConfigResArgs {
-      path: Some(builder.create_string(&path)),
-      data: Some(data_off),
-    };
-    let inner = msg::CompilerConfigRes::create(builder, &msg_args);
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        inner: Some(inner.as_union_value()),
-        inner_type: msg::Any::CompilerConfigRes,
-        ..Default::default()
-      },
-    ))
-  }()))
+  let mut mappings_map: CachedMaps = HashMap::new();
+  let (orig_filename, orig_line, orig_column) = get_orig_position(
+    filename.to_owned(),
+    line.into(),
+    column.into(),
+    &mut mappings_map,
+    &state.ts_compiler,
+  );
+
+  let builder = &mut FlatBufferBuilder::new();
+  let msg_args = msg::ApplySourceMapArgs {
+    filename: Some(builder.create_string(&orig_filename)),
+    line: orig_line as i32,
+    column: orig_column as i32,
+  };
+  let res_inner = msg::ApplySourceMap::create(builder, &msg_args);
+  ok_buf(serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      inner: Some(res_inner.as_union_value()),
+      inner_type: msg::Any::ApplySourceMap,
+      ..Default::default()
+    },
+  ))
 }
 
 fn op_chdir(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_chdir().unwrap();
   let directory = inner.directory().unwrap();
-  Box::new(futures::future::result(|| -> OpResult {
-    std::env::set_current_dir(&directory)?;
-    Ok(empty_buf())
-  }()))
+  std::env::set_current_dir(&directory)?;
+  ok_buf(empty_buf())
 }
 
 fn op_global_timer_stop(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
-  assert!(base.sync());
+) -> CliOpResult {
+  if !base.sync() {
+    return Err(deno_error::no_async_support());
+  }
   assert!(data.is_none());
   let state = state;
   let mut t = state.global_timer.lock().unwrap();
   t.cancel();
-  ok_future(empty_buf())
+  Ok(Op::Sync(empty_buf()))
 }
 
 fn op_global_timer(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
-  assert!(!base.sync());
+) -> CliOpResult {
+  if base.sync() {
+    return Err(deno_error::no_sync_support());
+  }
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_global_timer().unwrap();
@@ -557,7 +628,7 @@ fn op_global_timer(
   let deadline = Instant::now() + Duration::from_millis(val as u64);
   let f = t.new_timeout(deadline);
 
-  Box::new(f.then(move |_| {
+  Ok(Op::Async(Box::new(f.then(move |_| {
     let builder = &mut FlatBufferBuilder::new();
     let inner =
       msg::GlobalTimerRes::create(builder, &msg::GlobalTimerResArgs {});
@@ -570,36 +641,32 @@ fn op_global_timer(
         ..Default::default()
       },
     ))
-  }))
+  }))))
 }
 
 fn op_set_env(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_set_env().unwrap();
   let key = inner.key().unwrap();
   let value = inner.value().unwrap();
-  if let Err(e) = state.check_env() {
-    return odd_future(e);
-  }
+  state.check_env()?;
   std::env::set_var(key, value);
-  ok_future(empty_buf())
+  ok_buf(empty_buf())
 }
 
 fn op_env(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
 
-  if let Err(e) = state.check_env() {
-    return odd_future(e);
-  }
+  state.check_env()?;
 
   let builder = &mut FlatBufferBuilder::new();
   let vars: Vec<_> = std::env::vars()
@@ -610,7 +677,7 @@ fn op_env(
     builder,
     &msg::EnvironResArgs { map: Some(tables) },
   );
-  ok_future(serialize_response(
+  let response_buf = serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -618,14 +685,15 @@ fn op_env(
       inner_type: msg::Any::EnvironRes,
       ..Default::default()
     },
-  ))
+  );
+  ok_buf(response_buf)
 }
 
 fn op_permissions(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let builder = &mut FlatBufferBuilder::new();
@@ -637,10 +705,10 @@ fn op_permissions(
       write: state.permissions.allows_write(),
       net: state.permissions.allows_net(),
       env: state.permissions.allows_env(),
-      high_precision: state.permissions.allows_high_precision(),
+      hrtime: state.permissions.allows_hrtime(),
     },
   );
-  ok_future(serialize_response(
+  let response_buf = serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -648,37 +716,35 @@ fn op_permissions(
       inner_type: msg::Any::PermissionsRes,
       ..Default::default()
     },
-  ))
+  );
+  ok_buf(response_buf)
 }
 
 fn op_revoke_permission(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_permission_revoke().unwrap();
   let permission = inner.permission().unwrap();
-  let result = match permission {
+  match permission {
     "run" => state.permissions.revoke_run(),
     "read" => state.permissions.revoke_read(),
     "write" => state.permissions.revoke_write(),
     "net" => state.permissions.revoke_net(),
     "env" => state.permissions.revoke_env(),
-    "highPrecision" => state.permissions.revoke_high_precision(),
+    "hrtime" => state.permissions.revoke_hrtime(),
     _ => Ok(()),
-  };
-  if let Err(e) = result {
-    return odd_future(e);
-  }
-  ok_future(empty_buf())
+  }?;
+  ok_buf(empty_buf())
 }
 
 fn op_fetch(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let inner = base.inner_as_fetch().unwrap();
   let cmd_id = base.cmd_id();
 
@@ -691,58 +757,53 @@ fn op_fetch(
     Some(buf) => hyper::Body::from(Vec::from(&*buf)),
   };
 
-  let maybe_req = msg_util::deserialize_request(header, body);
-  if let Err(e) = maybe_req {
-    return odd_future(e);
-  }
-  let req = maybe_req.unwrap();
+  let req = msg_util::deserialize_request(header, body)?;
 
-  let url_ = match url::Url::parse(url) {
-    Err(err) => return odd_future(DenoError::from(err)),
-    Ok(v) => v,
-  };
-  if let Err(e) = state.check_net_url(url_) {
-    return odd_future(e);
-  }
+  let url_ = url::Url::parse(url).map_err(ErrBox::from)?;
+  state.check_net_url(url_)?;
 
   let client = http_util::get_client();
 
   debug!("Before fetch {}", url);
-  let future =
-    client
-      .request(req)
-      .map_err(DenoError::from)
-      .and_then(move |res| {
-        let builder = &mut FlatBufferBuilder::new();
-        let header_off = msg_util::serialize_http_response(builder, &res);
-        let body = res.into_body();
-        let body_resource = resources::add_hyper_body(body);
-        let inner = msg::FetchRes::create(
-          builder,
-          &msg::FetchResArgs {
-            header: Some(header_off),
-            body_rid: body_resource.rid,
-          },
-        );
+  let future = client
+    .request(req)
+    .map_err(ErrBox::from)
+    .and_then(move |res| {
+      let builder = &mut FlatBufferBuilder::new();
+      let header_off = msg_util::serialize_http_response(builder, &res);
+      let body = res.into_body();
+      let body_resource = resources::add_hyper_body(body);
+      let inner = msg::FetchRes::create(
+        builder,
+        &msg::FetchResArgs {
+          header: Some(header_off),
+          body_rid: body_resource.rid,
+        },
+      );
 
-        Ok(serialize_response(
-          cmd_id,
-          builder,
-          msg::BaseArgs {
-            inner: Some(inner.as_union_value()),
-            inner_type: msg::Any::FetchRes,
-            ..Default::default()
-          },
-        ))
-      });
-  Box::new(future)
+      Ok(serialize_response(
+        cmd_id,
+        builder,
+        msg::BaseArgs {
+          inner: Some(inner.as_union_value()),
+          inner_type: msg::Any::FetchRes,
+          ..Default::default()
+        },
+      ))
+    });
+  if base.sync() {
+    let result_buf = future.wait()?;
+    Ok(Op::Sync(result_buf))
+  } else {
+    Ok(Op::Async(Box::new(future)))
+  }
 }
 
 // This is just type conversion. Implement From trait?
 // See https://github.com/tokio-rs/tokio/blob/ffd73a64e7ec497622b7f939e38017afe7124dc4/tokio-fs/src/lib.rs#L76-L85
-fn convert_blocking<F>(f: F) -> Poll<Buf, DenoError>
+fn convert_blocking<F>(f: F) -> Poll<Buf, ErrBox>
 where
-  F: FnOnce() -> DenoResult<Buf>,
+  F: FnOnce() -> Result<Buf, ErrBox>,
 {
   use futures::Async::*;
   match tokio_threadpool::blocking(f) {
@@ -753,14 +814,18 @@ where
   }
 }
 
-fn blocking<F>(is_sync: bool, f: F) -> Box<OpWithError>
+fn blocking<F>(is_sync: bool, f: F) -> CliOpResult
 where
-  F: 'static + Send + FnOnce() -> DenoResult<Buf>,
+  F: 'static + Send + FnOnce() -> Result<Buf, ErrBox>,
 {
   if is_sync {
-    Box::new(futures::future::result(f()))
+    let result_buf = f()?;
+    Ok(Op::Sync(result_buf))
   } else {
-    Box::new(tokio_util::poll_fn(move || convert_blocking(f)))
+    Ok(Op::Async(Box::new(futures::sync::oneshot::spawn(
+      tokio_util::poll_fn(move || convert_blocking(f)),
+      &tokio_executor::DefaultExecutor::current(),
+    ))))
   }
 }
 
@@ -768,22 +833,20 @@ fn op_make_temp_dir(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let base = Box::new(*base);
   let inner = base.inner_as_make_temp_dir().unwrap();
   let cmd_id = base.cmd_id();
 
   // FIXME
-  if let Err(e) = state.check_write("make_temp") {
-    return odd_future(e);
-  }
+  state.check_write("make_temp")?;
 
   let dir = inner.dir().map(PathBuf::from);
   let prefix = inner.prefix().map(String::from);
   let suffix = inner.suffix().map(String::from);
 
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     // TODO(piscisaureus): use byte vector for paths, not a string.
     // See https://github.com/denoland/deno/issues/627.
     // We can't assume that paths are always valid utf8 strings.
@@ -817,19 +880,14 @@ fn op_mkdir(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_mkdir().unwrap();
-  let (path, path_) = match resolve_path(inner.path().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (path, path_) = deno_fs::resolve_from_cwd(inner.path().unwrap())?;
   let recursive = inner.recursive();
   let mode = inner.mode();
 
-  if let Err(e) = state.check_write(&path_) {
-    return odd_future(e);
-  }
+  state.check_write(&path_)?;
 
   blocking(base.sync(), move || {
     debug!("op_mkdir {}", path_);
@@ -842,18 +900,13 @@ fn op_chmod(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_chmod().unwrap();
   let _mode = inner.mode();
-  let (path, path_) = match resolve_path(inner.path().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (path, path_) = deno_fs::resolve_from_cwd(inner.path().unwrap())?;
 
-  if let Err(e) = state.check_write(&path_) {
-    return odd_future(e);
-  }
+  state.check_write(&path_)?;
 
   blocking(base.sync(), move || {
     debug!("op_chmod {}", &path_);
@@ -873,16 +926,14 @@ fn op_chown(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_chown().unwrap();
   let path = String::from(inner.path().unwrap());
   let uid = inner.uid();
   let gid = inner.gid();
 
-  if let Err(e) = state.check_write(&path) {
-    return odd_future(e);
-  }
+  state.check_write(&path)?;
 
   blocking(base.sync(), move || {
     debug!("op_chown {}", &path);
@@ -897,14 +948,12 @@ fn op_open(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_open().unwrap();
-  let (filename, filename_) = match resolve_path(inner.filename().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (filename, filename_) =
+    deno_fs::resolve_from_cwd(inner.filename().unwrap())?;
   let mode = inner.mode().unwrap();
 
   let mut open_options = tokio::fs::OpenOptions::new();
@@ -945,29 +994,19 @@ fn op_open(
 
   match mode {
     "r" => {
-      if let Err(e) = state.check_read(&filename_) {
-        return odd_future(e);
-      }
+      state.check_read(&filename_)?;
     }
     "w" | "a" | "x" => {
-      if let Err(e) = state.check_write(&filename_) {
-        return odd_future(e);
-      }
+      state.check_write(&filename_)?;
     }
     &_ => {
-      if let Err(e) = state.check_read(&filename_) {
-        return odd_future(e);
-      }
-      if let Err(e) = state.check_write(&filename_) {
-        return odd_future(e);
-      }
+      state.check_read(&filename_)?;
+      state.check_write(&filename_)?;
     }
   }
 
-  let op = open_options
-    .open(filename)
-    .map_err(DenoError::from)
-    .and_then(move |fs_file| -> OpResult {
+  let op = open_options.open(filename).map_err(ErrBox::from).and_then(
+    move |fs_file| {
       let resource = resources::add_fs_file(fs_file);
       let builder = &mut FlatBufferBuilder::new();
       let inner =
@@ -981,23 +1020,29 @@ fn op_open(
           ..Default::default()
         },
       ))
-    });
-  Box::new(op)
+    },
+  );
+  if base.sync() {
+    let buf = op.wait()?;
+    Ok(Op::Sync(buf))
+  } else {
+    Ok(Op::Async(Box::new(op)))
+  }
 }
 
 fn op_close(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_close().unwrap();
   let rid = inner.rid();
   match resources::lookup(rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(resource) => {
       resource.close();
-      ok_future(empty_buf())
+      ok_buf(empty_buf())
     }
   }
 }
@@ -1006,28 +1051,26 @@ fn op_kill(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_kill().unwrap();
   let pid = inner.pid();
   let signo = inner.signo();
-  match kill(pid, signo) {
-    Ok(_) => ok_future(empty_buf()),
-    Err(e) => odd_future(e),
-  }
+  kill(pid, signo)?;
+  ok_buf(empty_buf())
 }
 
 fn op_shutdown(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_shutdown().unwrap();
   let rid = inner.rid();
   let how = inner.how();
   match resources::lookup(rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(mut resource) => {
       let shutdown_mode = match how {
         0 => Shutdown::Read,
@@ -1047,16 +1090,16 @@ fn op_read(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_read().unwrap();
   let rid = inner.rid();
 
   match resources::lookup(rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(resource) => {
       let op = tokio::io::read(resource, data.unwrap())
-        .map_err(DenoError::from)
+        .map_err(ErrBox::from)
         .and_then(move |(_resource, _buf, nread)| {
           let builder = &mut FlatBufferBuilder::new();
           let inner = msg::ReadRes::create(
@@ -1076,7 +1119,12 @@ fn op_read(
             },
           ))
         });
-      Box::new(op)
+      if base.sync() {
+        let buf = op.wait()?;
+        Ok(Op::Sync(buf))
+      } else {
+        Ok(Op::Async(Box::new(op)))
+      }
     }
   }
 }
@@ -1085,16 +1133,16 @@ fn op_write(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_write().unwrap();
   let rid = inner.rid();
 
   match resources::lookup(rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(resource) => {
       let op = tokio_write::write(resource, data.unwrap())
-        .map_err(DenoError::from)
+        .map_err(ErrBox::from)
         .and_then(move |(_resource, _buf, nwritten)| {
           let builder = &mut FlatBufferBuilder::new();
           let inner = msg::WriteRes::create(
@@ -1113,7 +1161,12 @@ fn op_write(
             },
           ))
         });
-      Box::new(op)
+      if base.sync() {
+        let buf = op.wait()?;
+        Ok(Op::Sync(buf))
+      } else {
+        Ok(Op::Async(Box::new(op)))
+      }
     }
   }
 }
@@ -1122,20 +1175,24 @@ fn op_seek(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
-  let _cmd_id = base.cmd_id();
   let inner = base.inner_as_seek().unwrap();
   let rid = inner.rid();
   let offset = inner.offset();
   let whence = inner.whence();
 
   match resources::lookup(rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(resource) => {
       let op = resources::seek(resource, offset, whence)
         .and_then(move |_| Ok(empty_buf()));
-      Box::new(op)
+      if base.sync() {
+        let buf = op.wait()?;
+        Ok(Op::Sync(buf))
+      } else {
+        Ok(Op::Async(Box::new(op)))
+      }
     }
   }
 }
@@ -1144,18 +1201,13 @@ fn op_remove(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_remove().unwrap();
-  let (path, path_) = match resolve_path(inner.path().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (path, path_) = deno_fs::resolve_from_cwd(inner.path().unwrap())?;
   let recursive = inner.recursive();
 
-  if let Err(e) = state.check_write(&path_) {
-    return odd_future(e);
-  }
+  state.check_write(&path_)?;
 
   blocking(base.sync(), move || {
     debug!("op_remove {}", path.display());
@@ -1175,24 +1227,14 @@ fn op_copy_file(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_copy_file().unwrap();
-  let (from, from_) = match resolve_path(inner.from().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
-  let (to, to_) = match resolve_path(inner.to().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (from, from_) = deno_fs::resolve_from_cwd(inner.from().unwrap())?;
+  let (to, to_) = deno_fs::resolve_from_cwd(inner.to().unwrap())?;
 
-  if let Err(e) = state.check_read(&from_) {
-    return odd_future(e);
-  }
-  if let Err(e) = state.check_write(&to_) {
-    return odd_future(e);
-  }
+  state.check_read(&from_)?;
+  state.check_write(&to_)?;
 
   debug!("op_copy_file {} {}", from.display(), to.display());
   blocking(base.sync(), move || {
@@ -1200,10 +1242,10 @@ fn op_copy_file(
     // See https://github.com/rust-lang/rust/issues/54800
     // Once the issue is reolved, we should remove this workaround.
     if cfg!(unix) && !from.is_file() {
-      return Err(errors::new(
-        ErrorKind::NotFound,
-        "File not found".to_string(),
-      ));
+      return Err(
+        DenoError::new(ErrorKind::NotFound, "File not found".to_string())
+          .into(),
+      );
     }
 
     fs::copy(&from, &to)?;
@@ -1235,45 +1277,39 @@ fn op_cwd(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
-  Box::new(futures::future::result(|| -> OpResult {
-    let path = std::env::current_dir()?;
-    let builder = &mut FlatBufferBuilder::new();
-    let cwd =
-      builder.create_string(&path.into_os_string().into_string().unwrap());
-    let inner =
-      msg::CwdRes::create(builder, &msg::CwdResArgs { cwd: Some(cwd) });
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        inner: Some(inner.as_union_value()),
-        inner_type: msg::Any::CwdRes,
-        ..Default::default()
-      },
-    ))
-  }()))
+  let path = std::env::current_dir()?;
+  let builder = &mut FlatBufferBuilder::new();
+  let cwd =
+    builder.create_string(&path.into_os_string().into_string().unwrap());
+  let inner = msg::CwdRes::create(builder, &msg::CwdResArgs { cwd: Some(cwd) });
+  let response_buf = serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      inner: Some(inner.as_union_value()),
+      inner_type: msg::Any::CwdRes,
+      ..Default::default()
+    },
+  );
+  ok_buf(response_buf)
 }
 
 fn op_stat(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_stat().unwrap();
   let cmd_id = base.cmd_id();
-  let (filename, filename_) = match resolve_path(inner.filename().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (filename, filename_) =
+    deno_fs::resolve_from_cwd(inner.filename().unwrap())?;
   let lstat = inner.lstat();
 
-  if let Err(e) = state.check_read(&filename_) {
-    return odd_future(e);
-  }
+  state.check_read(&filename_)?;
 
   blocking(base.sync(), move || {
     let builder = &mut FlatBufferBuilder::new();
@@ -1283,8 +1319,6 @@ fn op_stat(
     } else {
       fs::metadata(&filename)?
     };
-
-    let filename_str = builder.create_string(&filename_);
 
     let inner = msg::StatRes::create(
       builder,
@@ -1297,7 +1331,6 @@ fn op_stat(
         created: to_seconds!(metadata.created()),
         mode: get_mode(&metadata.permissions()),
         has_mode: cfg!(target_family = "unix"),
-        path: Some(filename_str),
         ..Default::default()
       },
     );
@@ -1318,20 +1351,15 @@ fn op_read_dir(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_read_dir().unwrap();
   let cmd_id = base.cmd_id();
-  let (path, path_) = match resolve_path(inner.path().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (path, path_) = deno_fs::resolve_from_cwd(inner.path().unwrap())?;
 
-  if let Err(e) = state.check_read(&path_) {
-    return odd_future(e);
-  }
+  state.check_read(&path_)?;
 
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     debug!("op_read_dir {}", path.display());
     let builder = &mut FlatBufferBuilder::new();
     let entries: Vec<_> = fs::read_dir(path)?
@@ -1340,7 +1368,6 @@ fn op_read_dir(
         let metadata = entry.metadata().unwrap();
         let file_type = metadata.file_type();
         let name = builder.create_string(entry.file_name().to_str().unwrap());
-        let path = builder.create_string(entry.path().to_str().unwrap());
 
         msg::StatRes::create(
           builder,
@@ -1352,12 +1379,12 @@ fn op_read_dir(
             accessed: to_seconds!(metadata.accessed()),
             created: to_seconds!(metadata.created()),
             name: Some(name),
-            path: Some(path),
             mode: get_mode(&metadata.permissions()),
             has_mode: cfg!(target_family = "unix"),
           },
         )
-      }).collect();
+      })
+      .collect();
 
     let entries = builder.create_vector(&entries);
     let inner = msg::ReadDirRes::create(
@@ -1382,22 +1409,16 @@ fn op_rename(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_rename().unwrap();
-  let (oldpath, _) = match resolve_path(inner.oldpath().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
-  let (newpath, newpath_) = match resolve_path(inner.newpath().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (oldpath, _) = deno_fs::resolve_from_cwd(inner.oldpath().unwrap())?;
+  let (newpath, newpath_) =
+    deno_fs::resolve_from_cwd(inner.newpath().unwrap())?;
 
-  if let Err(e) = state.check_write(&newpath_) {
-    return odd_future(e);
-  }
-  blocking(base.sync(), move || -> OpResult {
+  state.check_write(&newpath_)?;
+
+  blocking(base.sync(), move || {
     debug!("op_rename {} {}", oldpath.display(), newpath.display());
     fs::rename(&oldpath, &newpath)?;
     Ok(empty_buf())
@@ -1408,23 +1429,16 @@ fn op_link(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_link().unwrap();
-  let (oldname, _) = match resolve_path(inner.oldname().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
-  let (newname, newname_) = match resolve_path(inner.newname().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (oldname, _) = deno_fs::resolve_from_cwd(inner.oldname().unwrap())?;
+  let (newname, newname_) =
+    deno_fs::resolve_from_cwd(inner.newname().unwrap())?;
 
-  if let Err(e) = state.check_write(&newname_) {
-    return odd_future(e);
-  }
+  state.check_write(&newname_)?;
 
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     debug!("op_link {} {}", oldname.display(), newname.display());
     std::fs::hard_link(&oldname, &newname)?;
     Ok(empty_buf())
@@ -1435,29 +1449,21 @@ fn op_symlink(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_symlink().unwrap();
-  let (oldname, _) = match resolve_path(inner.oldname().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
-  let (newname, newname_) = match resolve_path(inner.newname().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (oldname, _) = deno_fs::resolve_from_cwd(inner.oldname().unwrap())?;
+  let (newname, newname_) =
+    deno_fs::resolve_from_cwd(inner.newname().unwrap())?;
 
-  if let Err(e) = state.check_write(&newname_) {
-    return odd_future(e);
-  }
+  state.check_write(&newname_)?;
   // TODO Use type for Windows.
   if cfg!(windows) {
-    return odd_future(errors::new(
-      ErrorKind::Other,
-      "Not implemented".to_string(),
-    ));
+    return Err(
+      DenoError::new(ErrorKind::Other, "Not implemented".to_string()).into(),
+    );
   }
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     debug!("op_symlink {} {}", oldname.display(), newname.display());
     #[cfg(any(unix))]
     std::os::unix::fs::symlink(&oldname, &newname)?;
@@ -1469,20 +1475,15 @@ fn op_read_link(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_readlink().unwrap();
   let cmd_id = base.cmd_id();
-  let (name, name_) = match resolve_path(inner.name().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (name, name_) = deno_fs::resolve_from_cwd(inner.name().unwrap())?;
 
-  if let Err(e) = state.check_read(&name_) {
-    return odd_future(e);
-  }
+  state.check_read(&name_)?;
 
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     debug!("op_read_link {}", name.display());
     let path = fs::read_link(&name)?;
     let builder = &mut FlatBufferBuilder::new();
@@ -1509,7 +1510,7 @@ fn op_repl_start(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_repl_start().unwrap();
   let cmd_id = base.cmd_id();
@@ -1525,7 +1526,7 @@ fn op_repl_start(
     builder,
     &msg::ReplStartResArgs { rid: resource.rid },
   );
-  ok_future(serialize_response(
+  ok_buf(serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -1540,7 +1541,7 @@ fn op_repl_readline(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let inner = base.inner_as_repl_readline().unwrap();
   let cmd_id = base.cmd_id();
@@ -1548,7 +1549,7 @@ fn op_repl_readline(
   let prompt = inner.prompt().unwrap().to_owned();
   debug!("op_repl_readline {} {}", rid, prompt);
 
-  blocking(base.sync(), move || -> OpResult {
+  blocking(base.sync(), move || {
     let repl = resources::get_repl(rid)?;
     let line = repl.lock().unwrap().readline(&prompt)?;
 
@@ -1576,19 +1577,14 @@ fn op_truncate(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
 
   let inner = base.inner_as_truncate().unwrap();
-  let (filename, filename_) = match resolve_path(inner.name().unwrap()) {
-    Err(err) => return odd_future(err),
-    Ok(v) => v,
-  };
+  let (filename, filename_) = deno_fs::resolve_from_cwd(inner.name().unwrap())?;
   let len = inner.len();
 
-  if let Err(e) = state.check_write(&filename_) {
-    return odd_future(e);
-  }
+  state.check_write(&filename_)?;
 
   blocking(base.sync(), move || {
     debug!("op_truncate {} {}", filename_, len);
@@ -1602,7 +1598,7 @@ fn op_utime(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
 
   let inner = base.inner_as_utime().unwrap();
@@ -1610,9 +1606,7 @@ fn op_utime(
   let atime = inner.atime();
   let mtime = inner.mtime();
 
-  if let Err(e) = state.check_write(&filename) {
-    return odd_future(e);
-  }
+  state.check_write(&filename)?;
 
   blocking(base.sync(), move || {
     debug!("op_utimes {} {} {}", filename, atime, mtime);
@@ -1625,42 +1619,36 @@ fn op_listen(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
-  if let Err(e) = state.check_net("listen") {
-    return odd_future(e);
-  }
-
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_listen().unwrap();
   let network = inner.network().unwrap();
   assert_eq!(network, "tcp");
   let address = inner.address().unwrap();
 
-  Box::new(futures::future::result((move || {
-    let addr = resolve_addr(address).wait()?;
+  state.check_net(&address)?;
 
-    let listener = TcpListener::bind(&addr)?;
-    let resource = resources::add_tcp_listener(listener);
+  let addr = resolve_addr(address).wait()?;
+  let listener = TcpListener::bind(&addr)?;
+  let resource = resources::add_tcp_listener(listener);
 
-    let builder = &mut FlatBufferBuilder::new();
-    let inner = msg::ListenRes::create(
-      builder,
-      &msg::ListenResArgs { rid: resource.rid },
-    );
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        inner: Some(inner.as_union_value()),
-        inner_type: msg::Any::ListenRes,
-        ..Default::default()
-      },
-    ))
-  })()))
+  let builder = &mut FlatBufferBuilder::new();
+  let inner =
+    msg::ListenRes::create(builder, &msg::ListenResArgs { rid: resource.rid });
+  let response_buf = serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      inner: Some(inner.as_union_value()),
+      inner_type: msg::Any::ListenRes,
+      ..Default::default()
+    },
+  );
+  ok_buf(response_buf)
 }
 
-fn new_conn(cmd_id: u32, tcp_stream: TcpStream) -> OpResult {
+fn new_conn(cmd_id: u32, tcp_stream: TcpStream) -> Result<Buf, ErrBox> {
   let tcp_stream_resource = resources::add_tcp_stream(tcp_stream);
   // TODO forward socket_addr to client.
 
@@ -1684,27 +1672,29 @@ fn new_conn(cmd_id: u32, tcp_stream: TcpStream) -> OpResult {
 }
 
 fn op_accept(
-  state: &ThreadSafeState,
+  _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
-  if let Err(e) = state.check_net("accept") {
-    return odd_future(e);
-  }
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_accept().unwrap();
   let server_rid = inner.rid();
 
   match resources::lookup(server_rid) {
-    None => odd_future(errors::bad_resource()),
+    None => Err(deno_error::bad_resource()),
     Some(server_resource) => {
       let op = tokio_util::accept(server_resource)
-        .map_err(DenoError::from)
+        .map_err(ErrBox::from)
         .and_then(move |(tcp_stream, _socket_addr)| {
           new_conn(cmd_id, tcp_stream)
         });
-      Box::new(op)
+      if base.sync() {
+        let buf = op.wait()?;
+        Ok(Op::Sync(buf))
+      } else {
+        Ok(Op::Async(Box::new(op)))
+      }
     }
   }
 }
@@ -1713,33 +1703,34 @@ fn op_dial(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
-  if let Err(e) = state.check_net("dial") {
-    return odd_future(e);
-  }
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_dial().unwrap();
   let network = inner.network().unwrap();
   assert_eq!(network, "tcp"); // TODO Support others.
   let address = inner.address().unwrap();
 
-  let op =
-    resolve_addr(address)
-      .map_err(DenoError::from)
-      .and_then(move |addr| {
-        TcpStream::connect(&addr)
-          .map_err(DenoError::from)
-          .and_then(move |tcp_stream| new_conn(cmd_id, tcp_stream))
-      });
-  Box::new(op)
+  state.check_net(&address)?;
+
+  let op = resolve_addr(address).and_then(move |addr| {
+    TcpStream::connect(&addr)
+      .map_err(ErrBox::from)
+      .and_then(move |tcp_stream| new_conn(cmd_id, tcp_stream))
+  });
+  if base.sync() {
+    let buf = op.wait()?;
+    Ok(Op::Sync(buf))
+  } else {
+    Ok(Op::Async(Box::new(op)))
+  }
 }
 
 fn op_metrics(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
 
@@ -1748,7 +1739,7 @@ fn op_metrics(
     builder,
     &msg::MetricsResArgs::from(&state.metrics),
   );
-  ok_future(serialize_response(
+  ok_buf(serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -1759,11 +1750,39 @@ fn op_metrics(
   ))
 }
 
+fn op_home_dir(
+  _state: &ThreadSafeState,
+  base: &msg::Base<'_>,
+  data: Option<PinnedBuf>,
+) -> CliOpResult {
+  assert!(data.is_none());
+  let cmd_id = base.cmd_id();
+
+  let builder = &mut FlatBufferBuilder::new();
+  let path = dirs::home_dir()
+    .unwrap_or_default()
+    .into_os_string()
+    .into_string()
+    .unwrap_or_default();
+  let path = Some(builder.create_string(&path));
+  let inner = msg::HomeDirRes::create(builder, &msg::HomeDirResArgs { path });
+
+  ok_buf(serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      inner: Some(inner.as_union_value()),
+      inner_type: msg::Any::HomeDirRes,
+      ..Default::default()
+    },
+  ))
+}
+
 fn op_resources(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
 
@@ -1782,7 +1801,8 @@ fn op_resources(
           repr: Some(repr),
         },
       )
-    }).collect();
+    })
+    .collect();
 
   let resources = builder.create_vector(&res);
   let inner = msg::ResourcesRes::create(
@@ -1792,7 +1812,7 @@ fn op_resources(
     },
   );
 
-  ok_future(serialize_response(
+  ok_buf(serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -1815,13 +1835,13 @@ fn op_run(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
-  assert!(base.sync());
+) -> CliOpResult {
+  if !base.sync() {
+    return Err(deno_error::no_async_support());
+  }
   let cmd_id = base.cmd_id();
 
-  if let Err(e) = state.check_run() {
-    return odd_future(e);
-  }
+  state.check_run()?;
 
   assert!(data.is_none());
   let inner = base.inner_as_run().unwrap();
@@ -1840,17 +1860,30 @@ fn op_run(
     c.env(entry.key().unwrap(), entry.value().unwrap());
   });
 
-  c.stdin(subprocess_stdio_map(inner.stdin()));
-  c.stdout(subprocess_stdio_map(inner.stdout()));
-  c.stderr(subprocess_stdio_map(inner.stderr()));
+  // TODO: make this work with other resources, eg. sockets
+  let stdin_rid = inner.stdin_rid();
+  if stdin_rid > 0 {
+    c.stdin(resources::get_file(stdin_rid)?);
+  } else {
+    c.stdin(subprocess_stdio_map(inner.stdin()));
+  }
+
+  let stdout_rid = inner.stdout_rid();
+  if stdout_rid > 0 {
+    c.stdout(resources::get_file(stdout_rid)?);
+  } else {
+    c.stdout(subprocess_stdio_map(inner.stdout()));
+  }
+
+  let stderr_rid = inner.stderr_rid();
+  if stderr_rid > 0 {
+    c.stderr(resources::get_file(stderr_rid)?);
+  } else {
+    c.stderr(subprocess_stdio_map(inner.stderr()));
+  }
 
   // Spawn the command.
-  let child = match c.spawn_async() {
-    Ok(v) => v,
-    Err(err) => {
-      return odd_future(err.into());
-    }
-  };
+  let child = c.spawn_async().map_err(ErrBox::from)?;
 
   let pid = child.id();
   let resources = resources::add_child(child);
@@ -1873,7 +1906,7 @@ fn op_run(
 
   let builder = &mut FlatBufferBuilder::new();
   let inner = msg::RunRes::create(builder, &res_args);
-  ok_future(serialize_response(
+  Ok(Op::Sync(serialize_response(
     cmd_id,
     builder,
     msg::BaseArgs {
@@ -1881,29 +1914,22 @@ fn op_run(
       inner_type: msg::Any::RunRes,
       ..Default::default()
     },
-  ))
+  )))
 }
 
 fn op_run_status(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_run_status().unwrap();
   let rid = inner.rid();
 
-  if let Err(e) = state.check_run() {
-    return odd_future(e);
-  }
+  state.check_run()?;
 
-  let future = match resources::child_status(rid) {
-    Err(e) => {
-      return odd_future(e);
-    }
-    Ok(f) => f,
-  };
+  let future = resources::child_status(rid)?;
 
   let future = future.and_then(move |run_status| {
     let code = run_status.code();
@@ -1937,7 +1963,12 @@ fn op_run_status(
       },
     ))
   });
-  Box::new(future)
+  if base.sync() {
+    let buf = future.wait()?;
+    Ok(Op::Sync(buf))
+  } else {
+    Ok(Op::Async(Box::new(future)))
+  }
 }
 
 struct GetMessageFuture {
@@ -1961,15 +1992,18 @@ fn op_worker_get_message(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
+  if base.sync() {
+    return Err(deno_error::no_sync_support());
+  }
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
 
   let op = GetMessageFuture {
     state: state.clone(),
   };
-  let op = op.map_err(move |_| -> DenoError { unimplemented!() });
-  let op = op.and_then(move |maybe_buf| -> DenoResult<Buf> {
+  let op = op.map_err(move |_| -> ErrBox { unimplemented!() });
+  let op = op.and_then(move |maybe_buf| -> Result<Buf, ErrBox> {
     debug!("op_worker_get_message");
     let builder = &mut FlatBufferBuilder::new();
 
@@ -1988,7 +2022,7 @@ fn op_worker_get_message(
       },
     ))
   });
-  Box::new(op)
+  Ok(Op::Async(Box::new(op)))
 }
 
 /// Post message to host as guest worker
@@ -1996,29 +2030,26 @@ fn op_worker_post_message(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let cmd_id = base.cmd_id();
-
   let d = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
 
   let tx = {
     let wc = state.worker_channels.lock().unwrap();
     wc.0.clone()
   };
-  let op = tx.send(d);
-  let op = op.map_err(|e| errors::new(ErrorKind::Other, e.to_string()));
-  let op = op.and_then(move |_| -> DenoResult<Buf> {
-    let builder = &mut FlatBufferBuilder::new();
+  tx.send(d)
+    .wait()
+    .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
+  let builder = &mut FlatBufferBuilder::new();
 
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        ..Default::default()
-      },
-    ))
-  });
-  Box::new(op)
+  ok_buf(serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      ..Default::default()
+    },
+  ))
 }
 
 /// Create worker as the host
@@ -2026,36 +2057,34 @@ fn op_create_worker(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_create_worker().unwrap();
   let specifier = inner.specifier().unwrap();
 
-  Box::new(futures::future::result(move || -> OpResult {
-    let parent_state = state.clone();
+  let parent_state = state.clone();
 
-    let child_state = ThreadSafeState::new(
-      parent_state.flags.clone(),
-      parent_state.argv.clone(),
-      op_selector_std,
-      parent_state.progress.clone(),
-    );
-    let rid = child_state.resource.rid;
-    let name = format!("USER-WORKER-{}", specifier);
+  let child_state = ThreadSafeState::new(
+    parent_state.flags.clone(),
+    parent_state.argv.clone(),
+    op_selector_std,
+    parent_state.progress.clone(),
+  )?;
+  let rid = child_state.resource.rid;
+  let name = format!("USER-WORKER-{}", specifier);
 
-    let mut worker =
-      Worker::new(name, startup_data::deno_isolate_init(), child_state);
-    js_check(worker.execute("denoMain()"));
-    js_check(worker.execute("workerMain()"));
+  let mut worker =
+    Worker::new(name, startup_data::deno_isolate_init(), child_state);
+  worker.execute("denoMain()").unwrap();
+  worker.execute("workerMain()").unwrap();
 
-    let specifier_url =
-      root_specifier_to_url(specifier).map_err(DenoError::from)?;
+  let module_specifier = ModuleSpecifier::resolve_url_or_path(specifier)?;
 
-    // TODO(ry) Use execute_mod_async here.
-    let result = worker.execute_mod(&specifier_url, false);
-    match result {
-      Ok(worker) => {
+  let op =
+    worker
+      .execute_mod_async(&module_specifier, false)
+      .and_then(move |()| {
         let mut workers_tl = parent_state.workers.lock().unwrap();
         workers_tl.insert(rid, worker.shared());
         let builder = &mut FlatBufferBuilder::new();
@@ -2072,13 +2101,10 @@ fn op_create_worker(
             ..Default::default()
           },
         ))
-      }
-      Err((errors::RustOrJsError::Js(_), _worker)) => {
-        Err(errors::worker_init_failed())
-      }
-      Err((errors::RustOrJsError::Rust(err), _worker)) => Err(err),
-    }
-  }()))
+      });
+
+  let result = op.wait()?;
+  Ok(Op::Sync(result))
 }
 
 /// Return when the worker closes
@@ -2086,7 +2112,10 @@ fn op_host_get_worker_closed(
   state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
+  if base.sync() {
+    return Err(deno_error::no_sync_support());
+  }
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_host_get_worker_closed().unwrap();
@@ -2099,7 +2128,7 @@ fn op_host_get_worker_closed(
     worker.clone()
   };
 
-  Box::new(shared_worker_future.then(move |_result| {
+  let op = Box::new(shared_worker_future.then(move |_result| {
     let builder = &mut FlatBufferBuilder::new();
 
     Ok(serialize_response(
@@ -2109,7 +2138,8 @@ fn op_host_get_worker_closed(
         ..Default::default()
       },
     ))
-  }))
+  }));
+  Ok(Op::Async(Box::new(op)))
 }
 
 /// Get message from guest worker as host
@@ -2117,15 +2147,18 @@ fn op_host_get_message(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
+  if base.sync() {
+    return Err(deno_error::no_sync_support());
+  }
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_host_get_message().unwrap();
   let rid = inner.rid();
 
   let op = resources::get_message_from_worker(rid);
-  let op = op.map_err(move |_| -> DenoError { unimplemented!() });
-  let op = op.and_then(move |maybe_buf| -> DenoResult<Buf> {
+  let op = op.map_err(move |_| -> ErrBox { unimplemented!() });
+  let op = op.and_then(move |maybe_buf| -> Result<Buf, ErrBox> {
     let builder = &mut FlatBufferBuilder::new();
 
     let data = maybe_buf.as_ref().map(|buf| builder.create_vector(buf));
@@ -2143,7 +2176,7 @@ fn op_host_get_message(
       },
     ))
   });
-  Box::new(op)
+  Ok(Op::Async(Box::new(op)))
 }
 
 /// Post message to guest worker as host
@@ -2151,25 +2184,39 @@ fn op_host_post_message(
   _state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
-) -> Box<OpWithError> {
+) -> CliOpResult {
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_host_post_message().unwrap();
   let rid = inner.rid();
 
   let d = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
 
-  let op = resources::post_message_to_worker(rid, d);
-  let op = op.map_err(|e| errors::new(ErrorKind::Other, e.to_string()));
-  let op = op.and_then(move |_| -> DenoResult<Buf> {
-    let builder = &mut FlatBufferBuilder::new();
+  resources::post_message_to_worker(rid, d)
+    .wait()
+    .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
+  let builder = &mut FlatBufferBuilder::new();
 
-    Ok(serialize_response(
-      cmd_id,
-      builder,
-      msg::BaseArgs {
-        ..Default::default()
-      },
-    ))
-  });
-  Box::new(op)
+  ok_buf(serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      ..Default::default()
+    },
+  ))
+}
+
+fn op_get_random_values(
+  state: &ThreadSafeState,
+  _base: &msg::Base<'_>,
+  data: Option<PinnedBuf>,
+) -> CliOpResult {
+  if let Some(ref seeded_rng) = state.seeded_rng {
+    let mut rng = seeded_rng.lock().unwrap();
+    rng.fill(&mut data.unwrap()[..]);
+  } else {
+    let mut rng = thread_rng();
+    rng.fill(&mut data.unwrap()[..]);
+  }
+
+  ok_buf(empty_buf())
 }

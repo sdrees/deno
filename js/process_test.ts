@@ -1,6 +1,21 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
-import { test, testPerm, assert, assertEquals } from "./test_util.ts";
-const { kill, run, DenoError, ErrorKind } = Deno;
+import {
+  test,
+  testPerm,
+  assert,
+  assertEquals,
+  assertStrContains
+} from "./test_util.ts";
+const {
+  kill,
+  run,
+  DenoError,
+  ErrorKind,
+  readFile,
+  open,
+  makeTempDir,
+  writeFile
+} = Deno;
 
 test(function runPermissions(): void {
   let caughtError = false;
@@ -71,7 +86,7 @@ testPerm(
   { write: true, run: true },
   async function runWithCwdIsAsync(): Promise<void> {
     const enc = new TextEncoder();
-    const cwd = Deno.makeTempDirSync({ prefix: "deno_command_test" });
+    const cwd = await makeTempDir({ prefix: "deno_command_test" });
 
     const exitCodeFile = "deno_was_here";
     const pyProgramFile = "poll_exit.py";
@@ -141,13 +156,14 @@ testPerm({ run: true }, async function runStdoutPiped(): Promise<void> {
 
   const data = new Uint8Array(10);
   let r = await p.stdout.read(data);
-  assertEquals(r.nread, 5);
-  assertEquals(r.eof, false);
-  const s = new TextDecoder().decode(data.subarray(0, r.nread));
+  if (r === Deno.EOF) {
+    throw new Error("p.stdout.read(...) should not be EOF");
+  }
+  assertEquals(r, 5);
+  const s = new TextDecoder().decode(data.subarray(0, r));
   assertEquals(s, "hello");
   r = await p.stdout.read(data);
-  assertEquals(r.nread, 0);
-  assertEquals(r.eof, true);
+  assertEquals(r, Deno.EOF);
   p.stdout.close();
 
   const status = await p.status();
@@ -167,13 +183,14 @@ testPerm({ run: true }, async function runStderrPiped(): Promise<void> {
 
   const data = new Uint8Array(10);
   let r = await p.stderr.read(data);
-  assertEquals(r.nread, 5);
-  assertEquals(r.eof, false);
-  const s = new TextDecoder().decode(data.subarray(0, r.nread));
+  if (r === Deno.EOF) {
+    throw new Error("p.stderr.read should not return EOF here");
+  }
+  assertEquals(r, 5);
+  const s = new TextDecoder().decode(data.subarray(0, r));
   assertEquals(s, "hello");
   r = await p.stderr.read(data);
-  assertEquals(r.nread, 0);
-  assertEquals(r.eof, true);
+  assertEquals(r, Deno.EOF);
   p.stderr.close();
 
   const status = await p.status();
@@ -204,6 +221,57 @@ testPerm({ run: true }, async function runStderrOutput(): Promise<void> {
   assertEquals(s, "error");
   p.close();
 });
+
+testPerm(
+  { run: true, write: true, read: true },
+  async function runRedirectStdoutStderr(): Promise<void> {
+    const tempDir = await makeTempDir();
+    const fileName = tempDir + "/redirected_stdio.txt";
+    const file = await open(fileName, "w");
+
+    const p = run({
+      args: [
+        "python",
+        "-c",
+        "import sys; sys.stderr.write('error\\n'); sys.stdout.write('output\\n');"
+      ],
+      stdout: file.rid,
+      stderr: file.rid
+    });
+
+    await p.status();
+    p.close();
+    file.close();
+
+    const fileContents = await readFile(fileName);
+    const decoder = new TextDecoder();
+    const text = decoder.decode(fileContents);
+
+    assertStrContains(text, "error");
+    assertStrContains(text, "output");
+  }
+);
+
+testPerm(
+  { run: true, write: true, read: true },
+  async function runRedirectStdin(): Promise<void> {
+    const tempDir = await makeTempDir();
+    const fileName = tempDir + "/redirected_stdio.txt";
+    const encoder = new TextEncoder();
+    await writeFile(fileName, encoder.encode("hello"));
+    const file = await open(fileName, "r");
+
+    const p = run({
+      args: ["python", "-c", "import sys; assert 'hello' == sys.stdin.read();"],
+      stdin: file.rid
+    });
+
+    const status = await p.status();
+    assertEquals(status.code, 0);
+    p.close();
+    file.close();
+  }
+);
 
 testPerm({ run: true }, async function runEnv(): Promise<void> {
   const p = run({
@@ -240,8 +308,7 @@ testPerm({ run: true }, async function runClose(): Promise<void> {
 
   const data = new Uint8Array(10);
   let r = await p.stderr.read(data);
-  assertEquals(r.nread, 0);
-  assertEquals(r.eof, true);
+  assertEquals(r, Deno.EOF);
 });
 
 test(function signalNumbers(): void {

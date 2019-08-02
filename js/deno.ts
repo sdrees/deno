@@ -1,7 +1,7 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 
 // Public deno module.
-export { noColor, pid, env, exit, isTTY, execPath } from "./os";
+export { noColor, pid, env, exit, isTTY, execPath, homeDir } from "./os";
 export { chdir, cwd } from "./dir";
 export {
   File,
@@ -20,9 +20,9 @@ export {
   OpenMode
 } from "./files";
 export {
+  EOF,
   copy,
   toAsyncIterator,
-  ReadResult,
   SeekMode,
   Reader,
   SyncReader,
@@ -38,7 +38,7 @@ export {
   ReadWriteCloser,
   ReadWriteSeeker
 } from "./io";
-export { Buffer, readAll, readAllSync } from "./buffer";
+export { Buffer, readAll, readAllSync, writeAll, writeAllSync } from "./buffer";
 export { mkdirSync, mkdir } from "./mkdir";
 export {
   makeTempDirSync,
@@ -58,6 +58,7 @@ export { statSync, lstatSync, stat, lstat } from "./stat";
 export { linkSync, link } from "./link";
 export { symlinkSync, symlink } from "./symlink";
 export { writeFileSync, writeFile, WriteFileOptions } from "./write_file";
+export { applySourceMap } from "./error_stack";
 export { ErrorKind, DenoError } from "./errors";
 export {
   permissions,
@@ -87,6 +88,9 @@ export const args: string[] = [];
 // appear in the runtime type library.
 /** @internal */
 export { core } from "./core";
+
+/** @internal */
+export { setPrepareStackTrace } from "./error_stack";
 
 // TODO Don't expose Console nor stringifyArgs.
 /** @internal */

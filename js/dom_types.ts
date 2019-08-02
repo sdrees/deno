@@ -41,9 +41,6 @@ type ReferrerPolicy =
   | "unsafe-url";
 export type BlobPart = BufferSource | Blob | string;
 export type FormDataEntryValue = DomFile | string;
-export type EventListenerOrEventListenerObject =
-  | EventListener
-  | EventListenerObject;
 
 export interface DomIterable<K, V> {
   keys(): IterableIterator<K>;
@@ -67,16 +64,32 @@ interface AbortSignalEventMap {
   abort: ProgressEvent;
 }
 
+// https://dom.spec.whatwg.org/#node
+export enum NodeType {
+  ELEMENT_NODE = 1,
+  TEXT_NODE = 3,
+  DOCUMENT_FRAGMENT_NODE = 11
+}
+
+export const eventTargetHost: unique symbol = Symbol();
+export const eventTargetListeners: unique symbol = Symbol();
+export const eventTargetMode: unique symbol = Symbol();
+export const eventTargetNodeType: unique symbol = Symbol();
+
 export interface EventTarget {
+  [eventTargetHost]: EventTarget | null;
+  [eventTargetListeners]: { [type in string]: EventListener[] };
+  [eventTargetMode]: string;
+  [eventTargetNodeType]: NodeType;
   addEventListener(
     type: string,
-    listener: EventListenerOrEventListenerObject | null,
+    callback: (event: Event) => void | null,
     options?: boolean | AddEventListenerOptions
   ): void;
-  dispatchEvent(evt: Event): boolean;
+  dispatchEvent(event: Event): boolean;
   removeEventListener(
     type: string,
-    listener?: EventListenerOrEventListenerObject | null,
+    callback?: (event: Event) => void | null,
     options?: EventListenerOptions | boolean
   ): void;
 }
@@ -135,7 +148,9 @@ export interface URLSearchParams {
 }
 
 export interface EventListener {
-  (evt: Event): void;
+  handleEvent(event: Event): void;
+  readonly callback: (event: Event) => void | null;
+  readonly options: boolean | AddEventListenerOptions;
 }
 
 export interface EventInit {
@@ -167,11 +182,11 @@ export interface EventPath {
 
 export interface Event {
   readonly type: string;
-  readonly target: EventTarget | null;
-  readonly currentTarget: EventTarget | null;
+  target: EventTarget | null;
+  currentTarget: EventTarget | null;
   composedPath(): EventPath[];
 
-  readonly eventPhase: number;
+  eventPhase: number;
 
   stopPropagation(): void;
   stopImmediatePropagation(): void;
@@ -182,8 +197,16 @@ export interface Event {
   readonly defaultPrevented: boolean;
   readonly composed: boolean;
 
-  readonly isTrusted: boolean;
+  isTrusted: boolean;
   readonly timeStamp: Date;
+
+  dispatched: boolean;
+  readonly initialized: boolean;
+  inPassiveListener: boolean;
+  cancelBubble: boolean;
+  cancelBubbleImmediately: boolean;
+  path: EventPath[];
+  relatedTarget: EventTarget | null;
 }
 
 export interface CustomEvent extends Event {
@@ -217,12 +240,12 @@ interface ProgressEvent extends Event {
 }
 
 export interface EventListenerOptions {
-  capture?: boolean;
+  capture: boolean;
 }
 
 export interface AddEventListenerOptions extends EventListenerOptions {
-  once?: boolean;
-  passive?: boolean;
+  once: boolean;
+  passive: boolean;
 }
 
 interface AbortSignal extends EventTarget {
@@ -235,7 +258,7 @@ interface AbortSignal extends EventTarget {
   ): void;
   addEventListener(
     type: string,
-    listener: EventListenerOrEventListenerObject,
+    listener: EventListener,
     options?: boolean | AddEventListenerOptions
   ): void;
   removeEventListener<K extends keyof AbortSignalEventMap>(
@@ -245,7 +268,7 @@ interface AbortSignal extends EventTarget {
   ): void;
   removeEventListener(
     type: string,
-    listener: EventListenerOrEventListenerObject,
+    listener: EventListener,
     options?: boolean | EventListenerOptions
   ): void;
 }
@@ -255,10 +278,6 @@ export interface ReadableStream {
   cancel(): Promise<void>;
   getReader(): ReadableStreamReader;
   tee(): [ReadableStream, ReadableStream];
-}
-
-export interface EventListenerObject {
-  handleEvent(evt: Event): void;
 }
 
 export interface ReadableStreamReader {
@@ -428,6 +447,11 @@ export interface ResponseInit {
   headers?: HeadersInit;
   status?: number;
   statusText?: string;
+}
+
+export interface RequestConstructor {
+  new (input: RequestInfo, init?: RequestInit): Request;
+  prototype: Request;
 }
 
 export interface Request extends Body {

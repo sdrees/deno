@@ -11,7 +11,7 @@ import sys
 import json
 import time
 import shutil
-from util import run, run_output, root_path, build_path, executable_suffix
+from util import root_path, run, run_output, build_path, executable_suffix
 import tempfile
 import http_server
 import throughput_benchmark
@@ -203,6 +203,27 @@ def run_http(build_dir, new_data):
     new_data["max_latency"] = {k: v["max_latency"] for k, v in stats.items()}
 
 
+def bundle_benchmark(deno_exe):
+    bundles = {
+        "file_server": "https://deno.land/std/http/file_server.ts",
+        "gist": "https://deno.land/std/examples/gist.ts",
+    }
+
+    sizes = {}
+
+    for name, url in bundles.items():
+        # bundle
+        run([deno_exe, "bundle", url])
+        path = name + ".bundle.js"
+        # get size of bundle
+        assert os.path.exists(path)
+        sizes[name] = os.path.getsize(path)
+        # remove bundle
+        os.remove(path)
+
+    return sizes
+
+
 def main(argv):
     if len(argv) == 2:
         build_dir = sys.argv[1]
@@ -212,7 +233,8 @@ def main(argv):
         print "Usage: tools/benchmark.py [build_dir]"
         sys.exit(1)
 
-    sha1 = run_output(["git", "rev-parse", "HEAD"]).strip()
+    sha1 = run_output(["git", "rev-parse", "HEAD"],
+                      exit_on_fail=True).out.strip()
     http_server.spawn()
 
     deno_exe = os.path.join(build_dir, "deno")
@@ -231,6 +253,7 @@ def main(argv):
     new_data["benchmark"] = run_exec_time(deno_exe, build_dir)
 
     new_data["binary_size"] = get_binary_sizes(build_dir)
+    new_data["bundle_size"] = bundle_benchmark(deno_exe)
 
     # Cannot run throughput benchmark on windows because they don't have nc or
     # pipe.

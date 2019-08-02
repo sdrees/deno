@@ -17,11 +17,9 @@ A secure JavaScript/TypeScript runtime built with V8, Rust, and Tokio
 Deno aims to be a productive and secure scripting environment for the modern
 programmer.
 
-It will always be distributed as a single executable - and that executable will
-be sufficient software to run any deno program. Given a URL to a deno program,
-you should be able to execute it with nothing more than the 50 megabyte deno
-executable.
-
+Deno will always be distributed as a single executable. Given a URL to a Deno
+program, it is runnable with nothing more than
+[the 10 megabyte zipped executable](https://github.com/denoland/deno/releases).
 Deno explicitly takes on the role of both runtime and package manager. It uses a
 standard browser-compatible protocol for loading modules: URLs.
 
@@ -35,7 +33,8 @@ Deno provides <a href="https://github.com/denoland/deno_std">a set of reviewed
 
 - Support TypeScript out of the box.
 
-- Like the browser, allows imports from URLs:
+- Uses "ES Modules" and does not support `require()`. Like the browser, allows
+  imports from URLs:
 
   ```ts
   import * as log from "https://deno.land/std/log/mod.ts";
@@ -44,8 +43,6 @@ Deno provides <a href="https://github.com/denoland/deno_std">a set of reviewed
 - Remote code is fetched and cached on first execution, and never updated until
   the code is run with the `--reload` flag. (So, this will still work on an
   airplane. See `~/.deno/src` for details on the cache.)
-
-- Uses "ES Modules" and does not support `require()`.
 
 - File system and network access can be controlled in order to run sandboxed
   code. Access between V8 (unprivileged) and Rust (privileged) is only done via
@@ -68,11 +65,15 @@ Deno provides <a href="https://github.com/denoland/deno_std">a set of reviewed
   ([Currently it is relatively slow.](https://deno.land/benchmarks.html#req-per-sec))
 
 - Provide useful tooling out of the box:
-  - command-line debugger
-    [not yet](https://github.com/denoland/deno/issues/1120)
-  - linter [not yet](https://github.com/denoland/deno/issues/1880)
   - dependency inspector (`deno info`)
   - code formatter (`deno fmt`),
+  - bundling (`deno bundle`)
+  - runtime type info (`deno types`)
+  - test runner (`deno test`)
+    [not yet](https://github.com/denoland/deno_std/issues/193)
+  - command-line debugger (`--debug`)
+    [not yet](https://github.com/denoland/deno/issues/1120)
+  - linter (`deno lint`) [not yet](https://github.com/denoland/deno/issues/1880)
 
 ### Non-goals
 
@@ -94,20 +95,26 @@ scripts to download and install the binary.
 
 Using Shell:
 
-```shellsession
-$ curl -fsSL https://deno.land/x/install/install.sh | sh
+```shell
+curl -fsSL https://deno.land/x/install/install.sh | sh
 ```
 
 Using PowerShell:
 
-```shellsession
-> iwr https://deno.land/x/install/install.ps1 | iex
+```shell
+iwr https://deno.land/x/install/install.ps1 -useb | iex
 ```
 
 Using [Scoop](https://scoop.sh/) (windows):
 
-```
+```shell
 scoop install deno
+```
+
+Using [Homebrew](https://brew.sh/) (mac):
+
+```shell
+brew install deno
 ```
 
 Deno can also be installed manually, by downloading a tarball or zip file at
@@ -117,15 +124,32 @@ executable bit on Mac and Linux.
 
 Once it's installed and in your `$PATH`, try it:
 
-```shellsession
-$ deno run https://deno.land/welcome.ts
+```shell
+deno https://deno.land/welcome.ts
 ```
 
 ### Build from source
 
+Clone on Linux or Mac:
+
 ```bash
-# Fetch deps.
 git clone --recurse-submodules https://github.com/denoland/deno.git
+```
+
+On Windows, a couple extra steps are required to clone because we use symlinks
+in the repository. First
+[enable "Developer Mode"](https://www.google.com/search?q=windows+enable+developer+mode)
+(otherwise symlinks would require administrator privileges). Then you must set
+`core.symlinks=true` before the checkout is started.
+
+```bash
+git config --global core.symlinks=true
+git clone --recurse-submodules https://github.com/denoland/deno.git
+```
+
+Now we can start the build:
+
+```bash
 cd deno
 ./tools/setup.py
 
@@ -137,7 +161,7 @@ cd deno
 ./tools/build.py
 
 # Run.
-./target/debug/deno run tests/002_hello.ts
+./target/debug/deno tests/002_hello.ts
 
 # Test.
 ./tools/test.py
@@ -151,7 +175,7 @@ cd deno
 To ensure reproducible builds, deno has most of its dependencies in a git
 submodule. However, you need to install separately:
 
-1. [Rust](https://www.rust-lang.org/en-US/install.html) >= 1.34.1
+1. [Rust](https://www.rust-lang.org/en-US/install.html) >= 1.36.0
 2. [Node](https://nodejs.org/)
 3. Python 2.
    [Not 3](https://github.com/denoland/deno/issues/464#issuecomment-411795578).
@@ -199,10 +223,16 @@ Extra steps for Windows users:
 
 # Update third_party modules
 git submodule update
+
+# Skip downloading binary build tools and point the build
+# to the system provided ones (for packagers of deno ...).
+./tools/setup.py --no-binary-download
+export DENO_BUILD_ARGS="clang_base_path=/usr clang_use_chrome_plugins=false"
+DENO_GN_PATH=/usr/bin/gn DENO_NINJA_PATH=/usr/bin/ninja ./tools/build.py
 ```
 
 Environment variables: `DENO_BUILD_MODE`, `DENO_BUILD_PATH`, `DENO_BUILD_ARGS`,
-`DENO_DIR`.
+`DENO_DIR`, `DENO_GN_PATH`, `DENO_NINJA_PATH`.
 
 ## API reference
 
@@ -211,7 +241,7 @@ Environment variables: `DENO_BUILD_MODE`, `DENO_BUILD_PATH`, `DENO_BUILD_ARGS`,
 To get an exact reference of deno's runtime API, run the following in the
 command line:
 
-```shellsession
+```shell
 $ deno types
 ```
 
@@ -251,8 +281,8 @@ I/O streams in Deno.
 
 Try the program:
 
-```shellsession
-$ deno run --allow-read https://deno.land/std/examples/cat.ts /etc/passwd
+```shell
+$ deno --allow-read https://deno.land/std/examples/cat.ts /etc/passwd
 ```
 
 ### TCP echo server
@@ -277,32 +307,29 @@ const { listen, copy } = Deno;
 When this program is started, the user is prompted for permission to listen on
 the network:
 
-```shellsession
-$ deno run https://deno.land/std/examples/echo_server.ts
+```shell
+$ deno https://deno.land/std/examples/echo_server.ts
 ⚠️  Deno requests network access to "listen". Grant? [a/y/n/d (a = allow always, y = allow once, n = deny once, d = deny always)]
 ```
 
 For security reasons, deno does not allow programs to access the network without
 explicit permission. To avoid the console prompt, use a command-line flag:
 
-```shellsession
-$ deno run --allow-net https://deno.land/std/examples/echo_server.ts
+```shell
+$ deno --allow-net https://deno.land/std/examples/echo_server.ts
 ```
 
-To test it, try sending a HTTP request to it by using curl. The request gets
-written directly back to the client.
+To test it, try sending data to it with netcat:
 
-```shellsession
-$ curl http://localhost:8080/
-GET / HTTP/1.1
-Host: localhost:8080
-User-Agent: curl/7.54.0
-Accept: */*
+```shell
+$ nc localhost 8080
+hello world
+hello world
 ```
 
-It's worth noting that like the `cat.ts` example, the `copy()` function here
-also does not make unnecessary memory copies. It receives a packet from the
-kernel and sends back, without further complexity.
+Like the `cat.ts` example, the `copy()` function here also does not make
+unnecessary memory copies. It receives a packet from the kernel and sends back,
+without further complexity.
 
 ### Inspecting and revoking permissions
 
@@ -326,6 +353,7 @@ const { permissions, revokePermission, open, remove } = Deno;
   revokePermission("write");
 
   // use the log file
+  const encoder = new TextEncoder();
   await log.write(encoder.encode("hello\n"));
 
   // this will prompt for the write permission or fail.
@@ -338,13 +366,12 @@ const { permissions, revokePermission, open, remove } = Deno;
 This one serves a local directory in HTTP.
 
 ```bash
-alias file_server="deno run --allow-net --allow-read \
-  https://deno.land/std/http/file_server.ts"
+deno install file_server https://deno.land/std/http/file_server.ts --allow-net --allow-read
 ```
 
 Run it:
 
-```shellsession
+```shell
 $ file_server .
 Downloading https://deno.land/std/http/file_server.ts...
 [...]
@@ -353,8 +380,39 @@ HTTP server listening on http://0.0.0.0:4500/
 
 And if you ever want to upgrade to the latest published version:
 
-```shellsession
+```shell
 $ file_server --reload
+```
+
+### Permissions whitelist
+
+deno also provides permissions whitelist.
+
+This is an example to restrict File system access by whitelist.
+
+```shell
+$ deno --allow-read=/usr https://deno.land/std/examples/cat.ts /etc/passwd
+⚠️  Deno requests read access to "/etc/passwd". Grant? [a/y/n/d (a = allow always, y = allow once, n = deny once, d = deny always)]
+```
+
+You can grant read permission under `/etc` dir
+
+```shell
+$ deno --allow-read=/etc https://deno.land/std/examples/cat.ts /etc/passwd
+```
+
+`--allow-write` works same as `--allow-read`.
+
+This is an example to restrict host.
+
+```ts
+(async () => {
+  const result = await fetch("https://deno.land/std/examples/echo_server.ts");
+})();
+```
+
+```shell
+$ deno --allow-net=deno.land allow-net-whitelist-example.ts
 ```
 
 ### Run subprocess
@@ -364,7 +422,7 @@ $ file_server --reload
 Example:
 
 ```ts
-async function main() {
+window.onload = async function() {
   // create subprocess
   const p = Deno.run({
     args: ["echo", "hello"]
@@ -372,24 +430,27 @@ async function main() {
 
   // await its completion
   await p.status();
-}
-
-main();
+};
 ```
 
 Run it:
 
-```shellsession
-$ deno run --allow-run ./subprocess_simple.ts
+```shell
+$ deno --allow-run ./subprocess_simple.ts
 hello
 ```
+
+Here a function is assigned to `window.onload`. This function is called after
+the main script is loaded. This is the same as
+[onload](https://developer.mozilla.org/en-US/docs/Web/API/GlobalEventHandlers/onload)
+of the browsers, and it can be used as the main entrypoint.
 
 By default when you use `Deno.run()` subprocess inherits `stdin`, `stdout` and
 `stderr` of parent process. If you want to communicate with started subprocess
 you can use `"piped"` option.
 
 ```ts
-async function main() {
+window.onload = async function() {
   const decoder = new TextDecoder();
 
   const fileNames = Deno.args.slice(1);
@@ -397,6 +458,7 @@ async function main() {
   const p = Deno.run({
     args: [
       "deno",
+      "run",
       "--allow-read",
       "https://deno.land/std/examples/cat.ts",
       ...fileNames
@@ -417,14 +479,12 @@ async function main() {
   }
 
   Deno.exit(code);
-}
-
-main();
+};
 ```
 
 When you run it:
 
-```shellsession
+```shell
 $ deno run --allow-run ./subprocess.ts <somefile>
 [file content]
 
@@ -459,7 +519,7 @@ runIfMain(import.meta);
 
 Try running this:
 
-```shellsession
+```shell
 $ deno run test.ts
 running 2 tests
 test t1 ... ok
@@ -535,32 +595,45 @@ if (import.meta.main) {
 
 ### Flags
 
-```shellsession
-deno
+Use `deno help` to see the help text.
 
+```
 USAGE:
-    deno [FLAGS] [OPTIONS] [SUBCOMMAND]
-
-FLAGS:
-    -h, --help          Prints help information
-    -D, --log-debug     Log debug output
-    -r, --reload        Reload source code cache (recompile TypeScript)
-        --v8-options    Print V8 command line options
+    deno [OPTIONS] [SUBCOMMAND]
 
 OPTIONS:
-    -c, --config <FILE>          Load compiler configuration file
-        --v8-flags=<v8-flags>    Set V8 command line options
+    -A, --allow-all                    Allow all permissions
+        --allow-env                    Allow environment access
+        --allow-hrtime                 Allow high resolution time measurement
+        --allow-net=<allow-net>        Allow network access
+        --allow-read=<allow-read>      Allow file system read access
+        --allow-run                    Allow running subprocesses
+        --allow-write=<allow-write>    Allow file system write access
+    -c, --config <FILE>                Load compiler configuration file
+    -h, --help                         Prints help information
+        --importmap <FILE>             Load import map file
+    -L, --log-level <log-level>        Set log level [possible values: debug, info]
+        --no-fetch                     Do not download remote modules
+        --no-prompt                    Do not use prompts
+    -r, --reload                       Reload source code cache (recompile TypeScript)
+        --seed <NUMBER>                Seed Math.random()
+        --v8-flags=<v8-flags>          Set V8 command line options
+        --v8-options                   Print V8 command line options
 
 SUBCOMMANDS:
-    eval       Eval script
-    fetch      Fetch the dependencies
-    fmt        Format files
-    help       Prints this message or the help of the given subcommand(s)
-    info       Show source file related info
-    run        Run a program given a filename or url to the source code
-    types      Print runtime TypeScript declarations
-    version    Print the version
-    xeval      Eval a script on text segments from stdin
+    [SCRIPT]       Script to run
+    bundle         Bundle module and dependencies into single file
+    completions    Generate shell completions
+    eval           Eval script
+    fetch          Fetch the dependencies
+    fmt            Format files
+    help           Prints this message or the help of the given subcommand(s)
+    info           Show source file related info
+    install        Install script as executable
+    run            Run a program given a filename or url to the source code
+    types          Print runtime TypeScript declarations
+    version        Print the version
+    xeval          Eval a script on text segments from stdin
 
 ENVIRONMENT VARIABLES:
     DENO_DIR        Set deno's base directory
@@ -578,6 +651,27 @@ generated and cached source code is written and read to.
 code can test if `NO_COLOR` was set without having `--allow-env` by using the
 boolean constant `Deno.noColor`.
 
+### Shell completion
+
+You can generate completion script for your shell using the
+`deno completions <shell>` command. The command outputs to stdout so you should
+redirect it to an appropriate file.
+
+The supported shells are:
+
+- zsh
+- bash
+- fish
+- powershell
+- elvish
+
+Example:
+
+```shell
+deno completions bash > /usr/local/etc/bash_completion.d/deno.bash
+source /usr/local/etc/bash_completion.d/deno.bash
+```
+
 ### V8 flags
 
 V8 has many many internal command-line flags, that you can see with
@@ -588,6 +682,164 @@ Particularly useful ones:
 
 ```
 --async-stack-trace
+```
+
+### Bundling
+
+`deno bundle [URL]` will output a single JavaScript file, using
+[AMD](https://en.wikipedia.org/wiki/Asynchronous_module_definition), which
+includes all dependencies of the specified input.
+
+```
+> deno bundle https://deno.land/std/examples/colors.ts
+Bundling "colors.bundle.js"
+Emitting bundle to "colors.bundle.js"
+9.2 kB emitted.
+```
+
+To run then bundle in Deno use
+
+```
+deno https://deno.land/std/bundle/run.ts colors.bundle.js
+```
+
+Bundles can also be loaded in the web browser with the assistance of
+[RequireJS](https://requirejs.org/). Suppose we have a bundle called
+`website.bundle.js`, then the following HTML should be able to load it:
+
+```html
+<script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
+<script src="website.bundle.js"></script>
+<script>
+  requirejs(["website"], website => website.main());
+</script>
+```
+
+Here we assume there's an exported function `main()` from `website.ts`.
+
+```js
+// website.ts
+export main() {
+  console.log("hello from the web browser");
+}
+```
+
+### Installing executable scripts
+
+Deno provides ability to easily install and distribute executable code via
+`deno install` command.
+
+`deno install [EXE_NAME] [URL] [FLAGS...]` will install script available at
+`URL` with name `EXE_NAME`.
+
+This command is a thin wrapper that creates executable shell scripts which
+invoke `deno` with specified permissions and CLI flags.
+
+Example:
+
+```shell
+$ deno install file_server https://deno.land/std/http/file_server.ts --allow-net --allow-read
+[1/1] Compiling https://deno.land/std/http/file_server.ts
+
+✅ Successfully installed file_server.
+/Users/deno/.deno/bin/file_server
+```
+
+By default scripts are installed at `$HOME/.deno/bin` and that directory must be
+added to the path manually.
+
+```shell
+$ echo 'export PATH="$HOME/.deno/bin:$PATH"' >> ~/.bashrc
+```
+
+Installation directory can be changed using `-d/--dir` flag:
+
+```shell
+$ deno install --dir /usr/local/bin prettier https://deno.land/std/prettier/main.ts --allow-write --allow-read
+```
+
+When installing a script you can specify permissions that will be used to run
+the script. They are placed after the script URL and can be mixed with any
+additional CLI flags you want to pass to the script.
+
+Example:
+
+```shell
+$ deno install format_check https://deno.land/std/prettier/main.ts --allow-write --allow-read --check --print-width 88 --tab-width 2
+```
+
+Above command creates an executable called `format_check` that runs `prettier`
+with write and read permissions. When you run `format_check` deno will run
+prettier in `check` mode and configured to use `88` column width with `2` column
+tabs.
+
+It is a good practice to use `import.meta.main` idiom for an entry point for
+executable file. See
+[Testing if current file is the main program](#testingifcurrentfileisthemainprogram)
+section.
+
+Example:
+
+```ts
+// https://example.com/awesome/cli.ts
+async function myAwesomeCli(): Promise<void> {
+  -- snip --
+}
+
+if (import.meta.main) {
+  myAwesomeCli();
+}
+```
+
+When you create executable script make sure to let users know by adding example
+installation command to your repository:
+
+```shell
+# Install using deno install
+
+$ deno install awesome_cli https://example.com/awesome/cli.ts
+```
+
+## Import maps
+
+Deno supports [import maps](https://github.com/WICG/import-maps).
+
+One can use import map with `--importmap=<FILE>` CLI flag.
+
+Current limitations:
+
+- single import map
+- no fallback URLs
+- Deno does not support `std:` namespace
+- Does supports only `file:`, `http:` and `https:` schemes
+
+Example:
+
+```js
+// import_map.json
+
+{
+   "imports": {
+      "http/": "https://deno.land/std/http/"
+   }
+}
+```
+
+```ts
+// hello_server.ts
+
+import { serve } from "http/server.ts";
+
+window.onload = async function() {
+  const body = new TextEncoder().encode("Hello World\n");
+  for await (const req of serve(":8000")) {
+    req.respond({ body });
+  }
+};
+```
+
+```shell
+$ deno run --importmap=import_map.json hello_server.ts
 ```
 
 ## Internal details
@@ -624,7 +876,7 @@ close(3);
 
 Metrics is deno's internal counters for various statics.
 
-```shellsession
+```shell
 > console.table(Deno.metrics())
 ┌──────────────────┬────────┐
 │     (index)      │ Values │
@@ -686,7 +938,7 @@ To learn more about `d8` and profiling, check out the following links:
 
 We can use LLDB to debug deno.
 
-```shellsession
+```shell
 $ lldb -- target/debug/deno run tests/worker.js
 > run
 > bt
@@ -698,13 +950,13 @@ $ lldb -- target/debug/deno run tests/worker.js
 To debug Rust code, we can use `rust-lldb`. It should come with `rustc` and is a
 wrapper around LLDB.
 
-```shellsession
+```shell
 $ rust-lldb -- ./target/debug/deno run --allow-net tests/http_bench.ts
 # On macOS, you might get warnings like
 # `ImportError: cannot import name _remove_dead_weakref`
 # In that case, use system python by setting PATH, e.g.
 # PATH=/System/Library/Frameworks/Python.framework/Versions/2.7/bin:$PATH
-(lldb) command script import "/Users/kevinqian/.rustup/toolchains/1.34.1-x86_64-apple-darwin/lib/rustlib/etc/lldb_rust_formatters.py"
+(lldb) command script import "/Users/kevinqian/.rustup/toolchains/1.36.0-x86_64-apple-darwin/lib/rustlib/etc/lldb_rust_formatters.py"
 (lldb) type summary add --no-value --python-function lldb_rust_formatters.print_val -x ".*" --category Rust
 (lldb) type category enable Rust
 (lldb) target create "../deno/target/debug/deno"
@@ -729,7 +981,7 @@ Rust. These common data structures are defined in
 
 ### Updating prebuilt binaries
 
-```shellsession
+```shell
 $ ./third_party/depot_tools/upload_to_google_storage.py -b denoland  \
   -e ~/.config/gcloud/legacy_credentials/ry@tinyclouds.org/.boto `which sccache`
 $ mv `which sccache`.sha1 prebuilt/linux64/
