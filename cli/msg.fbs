@@ -77,6 +77,8 @@ union Any {
   Truncate,
   HomeDir,
   HomeDirRes,
+  ExecPath,
+  ExecPathRes,
   Utime,
   WorkerGetMessage,
   WorkerGetMessageRes,
@@ -181,7 +183,6 @@ table StartRes {
   cwd: string;
   pid: uint32;
   argv: [string];
-  exec_path: string;
   main_module: string; // Absolute URL.
   debug_flag: bool;
   deps_flag: bool;
@@ -204,6 +205,9 @@ table FormatErrorRes {
 // Create worker as host
 table CreateWorker {
   specifier: string;
+  include_deno_namespace: bool;
+  has_source_code: bool;
+  source_code: string;
 }
 
 table CreateWorkerRes {
@@ -462,6 +466,12 @@ table Truncate {
 table HomeDir {}
 
 table HomeDirRes {
+  path: string;
+}
+
+table ExecPath {}
+
+table ExecPathRes {
   path: string;
 }
 

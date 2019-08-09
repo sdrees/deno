@@ -1,8 +1,9 @@
 // Copyright 2018 the Deno authors. All rights reserved. MIT license.
 
-// Do not add dependenies to modules.rs. it should remain decoupled from the
-// isolate to keep the Isolate struct from becoming too bloating for users who
-// do not need asynchronous module loading.
+// Do not add any dependency to modules.rs!
+// modules.rs is complex and should remain decoupled from isolate.rs to keep the
+// Isolate struct from becoming too bloating for users who do not need
+// asynchronous module loading.
 
 use crate::any_error::ErrBox;
 use crate::js_errors::CoreJSError;
@@ -12,12 +13,15 @@ use crate::libdeno::deno_buf;
 use crate::libdeno::deno_dyn_import_id;
 use crate::libdeno::deno_mod;
 use crate::libdeno::deno_pinned_buf;
+use crate::libdeno::OpId;
 use crate::libdeno::PinnedBuf;
 use crate::libdeno::Snapshot1;
 use crate::libdeno::Snapshot2;
 use crate::shared_queue::SharedQueue;
 use crate::shared_queue::RECOMMENDED_SIZE;
-use futures::stream::{FuturesUnordered, Stream};
+use futures::stream::FuturesUnordered;
+use futures::stream::Stream;
+use futures::stream::StreamFuture;
 use futures::task;
 use futures::Async::*;
 use futures::Future;
@@ -26,12 +30,16 @@ use libc::c_char;
 use libc::c_void;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::fmt;
 use std::ptr::null;
 use std::sync::{Arc, Mutex, Once};
 
 pub type Buf = Box<[u8]>;
 
 pub type OpAsyncFuture<E> = Box<dyn Future<Item = Buf, Error = E> + Send>;
+
+type PendingOpFuture =
+  Box<dyn Future<Item = (OpId, Buf), Error = CoreError> + Send>;
 
 pub enum Op<E> {
   Sync(Buf),
@@ -40,14 +48,87 @@ pub enum Op<E> {
 
 pub type CoreError = ();
 
-type CoreOpAsyncFuture = OpAsyncFuture<CoreError>;
-
 pub type CoreOp = Op<CoreError>;
+
+pub type OpResult<E> = Result<Op<E>, E>;
+
+/// Args: op_id, control_buf, zero_copy_buf
+type CoreDispatchFn = dyn Fn(OpId, &[u8], Option<PinnedBuf>) -> CoreOp;
 
 /// Stores a script used to initalize a Isolate
 pub struct Script<'a> {
   pub source: &'a str,
   pub filename: &'a str,
+}
+
+/// Represent result of fetching the source code of a module. Found module URL
+/// might be different from specified URL used for loading due to redirections
+/// (like HTTP 303). E.G. Both https://example.com/a.ts and
+/// https://example.com/b.ts may point to https://example.com/c.ts
+/// By keeping track of specified and found URL we can alias modules and avoid
+/// recompiling the same code 3 times.
+#[derive(Debug, Eq, PartialEq)]
+pub struct SourceCodeInfo {
+  pub code: String,
+  pub module_url_specified: String,
+  pub module_url_found: String,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum RecursiveLoadEvent {
+  Fetch(SourceCodeInfo),
+  Instantiate(deno_mod),
+}
+
+pub trait ImportStream: Stream {
+  fn register(
+    &mut self,
+    source_code_info: SourceCodeInfo,
+    isolate: &mut Isolate,
+  ) -> Result<(), ErrBox>;
+}
+
+type DynImportStream =
+  Box<dyn ImportStream<Item = RecursiveLoadEvent, Error = ErrBox> + Send>;
+
+type DynImportFn = Fn(deno_dyn_import_id, &str, &str) -> DynImportStream;
+
+/// Wraps DynImportStream to include the deno_dyn_import_id, so that it doesn't
+/// need to be exposed.
+#[derive(Debug)]
+struct DynImport {
+  pub id: deno_dyn_import_id,
+  pub inner: DynImportStream,
+}
+
+impl fmt::Debug for DynImportStream {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "DynImportStream(..)")
+  }
+}
+
+impl Stream for DynImport {
+  type Item = (deno_dyn_import_id, RecursiveLoadEvent);
+  type Error = (deno_dyn_import_id, ErrBox);
+
+  fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+    match self.inner.poll() {
+      Ok(Ready(Some(event))) => Ok(Ready(Some((self.id, event)))),
+      Ok(Ready(None)) => unreachable!(),
+      Err(e) => Err((self.id, e)),
+      Ok(NotReady) => Ok(NotReady),
+    }
+  }
+}
+
+impl ImportStream for DynImport {
+  fn register(
+    &mut self,
+    source_code_info: SourceCodeInfo,
+    isolate: &mut Isolate,
+  ) -> Result<(), ErrBox> {
+    self.inner.register(source_code_info, isolate)
+  }
 }
 
 // TODO(ry) It's ugly that we have both Script and OwnedScript. Ideally we
@@ -76,34 +157,7 @@ pub enum StartupData<'a> {
   None,
 }
 
-pub type OpResult<E> = Result<Op<E>, E>;
-
-type CoreDispatchFn = dyn Fn(&[u8], Option<PinnedBuf>) -> CoreOp;
-
-pub type DynImportFuture =
-  Box<dyn Future<Item = deno_mod, Error = ErrBox> + Send>;
-type DynImportFn = dyn Fn(&str, &str) -> DynImportFuture;
-
 type JSErrorCreateFn = dyn Fn(V8Exception) -> ErrBox;
-
-/// Wraps DynImportFuture to include the deno_dyn_import_id, so that it doesn't
-/// need to be exposed.
-struct DynImport {
-  id: deno_dyn_import_id,
-  inner: DynImportFuture,
-}
-
-impl Future for DynImport {
-  type Item = (deno_dyn_import_id, deno_mod);
-  type Error = (deno_mod, ErrBox);
-  fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
-    match self.inner.poll() {
-      Ok(Ready(mod_id)) => Ok(Ready((self.id, mod_id))),
-      Ok(NotReady) => Ok(NotReady),
-      Err(e) => Err((self.id, e)),
-    }
-  }
-}
 
 /// A single execution context of JavaScript. Corresponds roughly to the "Web
 /// Worker" concept in the DOM. An Isolate is a Future that can be used with
@@ -121,8 +175,8 @@ pub struct Isolate {
   js_error_create: Arc<JSErrorCreateFn>,
   needs_init: bool,
   shared: SharedQueue,
-  pending_ops: FuturesUnordered<CoreOpAsyncFuture>,
-  pending_dyn_imports: FuturesUnordered<DynImport>,
+  pending_ops: FuturesUnordered<PendingOpFuture>,
+  pending_dyn_imports: FuturesUnordered<StreamFuture<DynImport>>,
   have_unpolled_ops: bool,
   startup_script: Option<OwnedScript>,
 }
@@ -198,14 +252,17 @@ impl Isolate {
   /// corresponds to the second argument of Deno.core.dispatch().
   pub fn set_dispatch<F>(&mut self, f: F)
   where
-    F: Fn(&[u8], Option<PinnedBuf>) -> CoreOp + Send + Sync + 'static,
+    F: Fn(OpId, &[u8], Option<PinnedBuf>) -> CoreOp + Send + Sync + 'static,
   {
     self.dispatch = Some(Arc::new(f));
   }
 
   pub fn set_dyn_import<F>(&mut self, f: F)
   where
-    F: Fn(&str, &str) -> DynImportFuture + Send + Sync + 'static,
+    F: Fn(deno_dyn_import_id, &str, &str) -> DynImportStream
+      + Send
+      + Sync
+      + 'static,
   {
     self.dyn_import = Some(Arc::new(f));
   }
@@ -254,10 +311,10 @@ impl Isolate {
     debug!("dyn_import specifier {} referrer {} ", specifier, referrer);
 
     if let Some(ref f) = isolate.dyn_import {
-      let inner = f(specifier, referrer);
-      let fut = DynImport { inner, id };
+      let inner = f(id, specifier, referrer);
+      let stream = DynImport { inner, id };
       task::current().notify();
-      isolate.pending_dyn_imports.push(fut);
+      isolate.pending_dyn_imports.push(stream.into_future());
     } else {
       panic!("dyn_import callback not set")
     }
@@ -265,48 +322,33 @@ impl Isolate {
 
   extern "C" fn pre_dispatch(
     user_data: *mut c_void,
-    control_argv0: deno_buf,
+    op_id: OpId,
+    control_buf: deno_buf,
     zero_copy_buf: deno_pinned_buf,
   ) {
     let isolate = unsafe { Isolate::from_raw_ptr(user_data) };
-    let control_shared = isolate.shared.shift();
 
-    let op = if control_argv0.len() > 0 {
-      // The user called Deno.core.send(control)
-      if let Some(ref f) = isolate.dispatch {
-        f(control_argv0.as_ref(), PinnedBuf::new(zero_copy_buf))
-      } else {
-        panic!("isolate.dispatch not set")
-      }
-    } else if let Some(c) = control_shared {
-      // The user called Deno.sharedQueue.push(control)
-      if let Some(ref f) = isolate.dispatch {
-        f(&c, PinnedBuf::new(zero_copy_buf))
-      } else {
-        panic!("isolate.dispatch not set")
-      }
+    let op = if let Some(ref f) = isolate.dispatch {
+      f(op_id, control_buf.as_ref(), PinnedBuf::new(zero_copy_buf))
     } else {
-      // The sharedQueue is empty. The shouldn't happen usually, but it's also
-      // not technically a failure.
-      #[cfg(test)]
-      unreachable!();
-      #[cfg(not(test))]
-      return;
+      panic!("isolate.dispatch not set")
     };
 
-    // At this point the SharedQueue should be empty.
-    assert_eq!(isolate.shared.size(), 0);
-
+    debug_assert_eq!(isolate.shared.size(), 0);
     match op {
       Op::Sync(buf) => {
         // For sync messages, we always return the response via Deno.core.send's
-        // return value.
-        // TODO(ry) check that if JSError thrown during respond(), that it will be
-        // picked up.
-        let _ = isolate.respond(Some(&buf));
+        // return value. Sync messages ignore the op_id.
+        let op_id = 0;
+        isolate
+          .respond(Some((op_id, &buf)))
+          // Because this is a sync op, deno_respond() does not actually call
+          // into JavaScript. We should not get an error here.
+          .expect("unexpected error");
       }
       Op::Async(fut) => {
-        isolate.pending_ops.push(fut);
+        let fut2 = fut.map(move |buf| (op_id, buf));
+        isolate.pending_ops.push(Box::new(fut2));
         isolate.have_unpolled_ops = true;
       }
     }
@@ -367,13 +409,16 @@ impl Isolate {
     }
   }
 
-  fn respond(&mut self, maybe_buf: Option<&[u8]>) -> Result<(), ErrBox> {
-    let buf = match maybe_buf {
-      None => deno_buf::empty(),
-      Some(r) => deno_buf::from(r),
+  fn respond(
+    &mut self,
+    maybe_buf: Option<(OpId, &[u8])>,
+  ) -> Result<(), ErrBox> {
+    let (op_id, buf) = match maybe_buf {
+      None => (0, deno_buf::empty()),
+      Some((op_id, r)) => (op_id, deno_buf::from(r)),
     };
     unsafe {
-      libdeno::deno_respond(self.libdeno_isolate, self.as_raw_ptr(), buf)
+      libdeno::deno_respond(self.libdeno_isolate, self.as_raw_ptr(), op_id, buf)
     }
     self.check_last_exception()
   }
@@ -443,24 +488,65 @@ impl Isolate {
     let (mod_id, maybe_err_str) = match result {
       Ok(mod_id) => (mod_id, None),
       Err(None) => (0, None),
-      Err(Some(err_str)) => (0, Some(err_str)),
+      Err(Some(err_str)) => (0, Some(CString::new(err_str).unwrap())),
     };
-    let err_ptr = maybe_err_str
-      .map(|e| e.as_ptr() as *const c_char)
-      .unwrap_or(std::ptr::null());
+    let err_str_ptr = match maybe_err_str {
+      Some(ref err_str) => err_str.as_ptr(),
+      None => std::ptr::null(),
+    };
     unsafe {
       libdeno::deno_dyn_import_done(
         self.libdeno_isolate,
         self.as_raw_ptr(),
         id,
         mod_id,
-        err_ptr,
+        err_str_ptr,
       )
     };
     self.check_last_exception().map_err(|err| {
       assert_eq!(id, 0);
       err
     })
+  }
+
+  fn poll_dyn_imports(&mut self) -> Poll<(), ErrBox> {
+    use RecursiveLoadEvent::*;
+    loop {
+      match self.pending_dyn_imports.poll() {
+        Ok(NotReady) | Ok(Ready(None)) => {
+          // There are no active dynamic import loaders, or none are ready.
+          return Ok(futures::Async::Ready(()));
+        }
+        Ok(Ready(Some((
+          Some((dyn_import_id, Fetch(source_code_info))),
+          mut stream,
+        )))) => {
+          // A module (not necessarily the one dynamically imported) has been
+          // fetched. Create and register it, and if successful, poll for the
+          // next recursive-load event related to this dynamic import.
+          match stream.register(source_code_info, self) {
+            Ok(()) => self.pending_dyn_imports.push(stream.into_future()),
+            Err(err) => {
+              self.dyn_import_done(dyn_import_id, Err(Some(err.to_string())))?
+            }
+          }
+        }
+        Ok(Ready(Some((Some((dyn_import_id, Instantiate(module_id))), _)))) => {
+          // The top-level module from a dynamic import has been instantiated.
+          match self.mod_evaluate(module_id) {
+            Ok(()) => self.dyn_import_done(dyn_import_id, Ok(module_id))?,
+            Err(..) => self.dyn_import_done(dyn_import_id, Err(None))?,
+          }
+        }
+        Err(((dyn_import_id, err), _)) => {
+          // A non-javascript error occurred; this could be due to a an invalid
+          // module specifier, or a problem with the source map, or a failure
+          // to fetch the module source code.
+          self.dyn_import_done(dyn_import_id, Err(Some(err.to_string())))?
+        }
+        Ok(Ready(Some((None, _)))) => unreachable!(),
+      }
+    }
   }
 }
 
@@ -561,24 +647,11 @@ impl Future for Isolate {
   fn poll(&mut self) -> Poll<(), ErrBox> {
     self.shared_init();
 
-    let mut overflow_response: Option<Buf> = None;
+    let mut overflow_response: Option<(OpId, Buf)> = None;
 
     loop {
       // If there are any pending dyn_import futures, do those first.
-      loop {
-        match self.pending_dyn_imports.poll() {
-          Ok(NotReady) | Ok(Ready(None)) => break,
-          Ok(Ready(Some((dyn_import_id, mod_id)))) => {
-            match self.mod_evaluate(mod_id) {
-              Ok(()) => self.dyn_import_done(dyn_import_id, Ok(mod_id))?,
-              Err(..) => self.dyn_import_done(dyn_import_id, Err(None))?,
-            }
-          }
-          Err((dyn_import_id, err)) => {
-            self.dyn_import_done(dyn_import_id, Err(Some(err.to_string())))?
-          }
-        }
-      }
+      self.poll_dyn_imports()?;
 
       // Now handle actual ops.
       self.have_unpolled_ops = false;
@@ -587,13 +660,13 @@ impl Future for Isolate {
         Err(_) => panic!("unexpected op error"),
         Ok(Ready(None)) => break,
         Ok(NotReady) => break,
-        Ok(Ready(Some(buf))) => {
-          let successful_push = self.shared.push(&buf);
+        Ok(Ready(Some((op_id, buf)))) => {
+          let successful_push = self.shared.push(op_id, &buf);
           if !successful_push {
             // If we couldn't push the response to the shared queue, because
             // there wasn't enough size, we will return the buffer via the
             // legacy route, using the argument of deno_respond.
-            overflow_response = Some(buf);
+            overflow_response = Some((op_id, buf));
             break;
           }
         }
@@ -612,8 +685,8 @@ impl Future for Isolate {
     if overflow_response.is_some() {
       // Lock the current thread for V8.
       let locker = LockerScope::new(self.libdeno_isolate);
-      let buf = overflow_response.take().unwrap();
-      self.respond(Some(&buf))?;
+      let (op_id, buf) = overflow_response.take().unwrap();
+      self.respond(Some((op_id, &buf)))?;
       drop(locker);
     }
 
@@ -621,7 +694,7 @@ impl Future for Isolate {
     self.check_last_exception()?;
 
     // We're idle if pending_ops is empty.
-    if self.pending_ops.is_empty() {
+    if self.pending_ops.is_empty() && self.pending_dyn_imports.is_empty() {
       Ok(futures::Async::Ready(()))
     } else {
       if self.have_unpolled_ops {
@@ -653,10 +726,11 @@ impl IsolateHandle {
   }
 }
 
-pub fn js_check(r: Result<(), ErrBox>) {
+pub fn js_check<T>(r: Result<T, ErrBox>) -> T {
   if let Err(e) = r {
     panic!(e.to_string());
   }
+  r.unwrap()
 }
 
 #[cfg(test)]
@@ -666,10 +740,11 @@ pub mod tests {
   use futures::future::lazy;
   use futures::future::ok;
   use futures::Async;
+  use std::io;
   use std::ops::FnOnce;
   use std::sync::atomic::{AtomicUsize, Ordering};
 
-  fn run_in_task<F, R>(f: F) -> R
+  pub fn run_in_task<F, R>(f: F) -> R
   where
     F: FnOnce() -> R,
   {
@@ -709,7 +784,8 @@ pub mod tests {
     let dispatch_count_ = dispatch_count.clone();
 
     let mut isolate = Isolate::new(StartupData::None, false);
-    isolate.set_dispatch(move |control, _| -> CoreOp {
+    isolate.set_dispatch(move |op_id, control, _| -> CoreOp {
+      println!("op_id {}", op_id);
       dispatch_count_.fetch_add(1, Ordering::Relaxed);
       match mode {
         Mode::AsyncImmediate => {
@@ -769,9 +845,9 @@ pub mod tests {
       "filename.js",
       r#"
         let control = new Uint8Array([42]);
-        Deno.core.send(control);
+        Deno.core.send(42, control);
         async function main() {
-          Deno.core.send(control);
+          Deno.core.send(42, control);
         }
         main();
         "#,
@@ -790,7 +866,7 @@ pub mod tests {
         import { b } from 'b.js'
         if (b() != 'b') throw Error();
         let control = new Uint8Array([42]);
-        Deno.core.send(control);
+        Deno.core.send(42, control);
       "#,
       )
       .unwrap();
@@ -836,7 +912,7 @@ pub mod tests {
         "setup2.js",
         r#"
         let nrecv = 0;
-        Deno.core.setAsyncHandler((buf) => {
+        Deno.core.setAsyncHandler((opId, buf) => {
           nrecv++;
         });
         "#,
@@ -847,7 +923,7 @@ pub mod tests {
         r#"
         assert(nrecv == 0);
         let control = new Uint8Array([42]);
-        Deno.core.send(control);
+        Deno.core.send(42, control);
         assert(nrecv == 0);
         "#,
       ));
@@ -858,7 +934,7 @@ pub mod tests {
         "check2.js",
         r#"
         assert(nrecv == 1);
-        Deno.core.send(control);
+        Deno.core.send(42, control);
         assert(nrecv == 1);
         "#,
       ));
@@ -871,41 +947,38 @@ pub mod tests {
     });
   }
 
-  #[test]
-  fn test_shared() {
-    run_in_task(|| {
-      let (mut isolate, dispatch_count) = setup(Mode::AsyncImmediate);
+  struct MockImportStream(Vec<Result<RecursiveLoadEvent, ErrBox>>);
 
-      js_check(isolate.execute(
-        "setup2.js",
-        r#"
-        let nrecv = 0;
-        Deno.core.setAsyncHandler((buf) => {
-          assert(buf.byteLength === 1);
-          assert(buf[0] === 43);
-          nrecv++;
-        });
-        "#,
-      ));
-      assert_eq!(dispatch_count.load(Ordering::Relaxed), 0);
+  impl Stream for MockImportStream {
+    type Item = RecursiveLoadEvent;
+    type Error = ErrBox;
+    fn poll(&mut self) -> Poll<Option<Self::Item>, Self::Error> {
+      let event = if self.0.is_empty() {
+        None
+      } else {
+        Some(self.0.remove(0)?)
+      };
+      Ok(Ready(event))
+    }
+  }
 
-      js_check(isolate.execute(
-        "send1.js",
-        r#"
-        let control = new Uint8Array([42]);
-        Deno.core.sharedQueue.push(control);
-        Deno.core.send();
-        assert(nrecv === 0);
-
-        Deno.core.sharedQueue.push(control);
-        Deno.core.send();
-        assert(nrecv === 0);
-        "#,
-      ));
-      assert_eq!(dispatch_count.load(Ordering::Relaxed), 2);
-      assert_eq!(Async::Ready(()), isolate.poll().unwrap());
-      js_check(isolate.execute("send1.js", "assert(nrecv === 2);"));
-    });
+  impl ImportStream for MockImportStream {
+    fn register(
+      &mut self,
+      module_data: SourceCodeInfo,
+      isolate: &mut Isolate,
+    ) -> Result<(), ErrBox> {
+      let id = isolate.mod_new(
+        false,
+        &module_data.module_url_found,
+        &module_data.code,
+      )?;
+      println!(
+        "MockImportStream register {} {}",
+        id, module_data.module_url_found
+      );
+      Ok(())
+    }
   }
 
   #[test]
@@ -915,13 +988,13 @@ pub mod tests {
       let count = Arc::new(AtomicUsize::new(0));
       let count_ = count.clone();
       let mut isolate = Isolate::new(StartupData::None, false);
-      isolate.set_dyn_import(move |specifier, referrer| {
+      isolate.set_dyn_import(move |_, specifier, referrer| {
         count_.fetch_add(1, Ordering::Relaxed);
         assert_eq!(specifier, "foo.js");
         assert_eq!(referrer, "dyn_import2.js");
-        Box::new(futures::future::err(
-          std::io::Error::new(std::io::ErrorKind::Other, "oh no!").into(),
-        ))
+        let err = io::Error::from(io::ErrorKind::NotFound);
+        let stream = MockImportStream(vec![Err(err.into())]);
+        Box::new(stream)
       });
       js_check(isolate.execute(
         "dyn_import2.js",
@@ -946,17 +1019,29 @@ pub mod tests {
       let count_ = count.clone();
 
       // Sometimes Rust is really annoying.
-      use std::sync::Mutex;
       let mod_b = Arc::new(Mutex::new(0));
       let mod_b2 = mod_b.clone();
 
       let mut isolate = Isolate::new(StartupData::None, false);
-      isolate.set_dyn_import(move |_specifier, referrer| {
-        count_.fetch_add(1, Ordering::Relaxed);
-        // assert_eq!(specifier, "foo.js");
+      isolate.set_dyn_import(move |_id, specifier, referrer| {
+        let c = count_.fetch_add(1, Ordering::Relaxed);
+        match c {
+          0 => assert_eq!(specifier, "foo1.js"),
+          1 => assert_eq!(specifier, "foo2.js"),
+          _ => unreachable!(),
+        }
         assert_eq!(referrer, "dyn_import3.js");
-        let mod_id = mod_b2.lock().unwrap();
-        Box::new(futures::future::ok(*mod_id))
+        let mod_id = *mod_b2.lock().unwrap();
+        let source_code_info = SourceCodeInfo {
+          module_url_specified: "foo.js".to_owned(),
+          module_url_found: "foo.js".to_owned(),
+          code: "".to_owned(),
+        };
+        let stream = MockImportStream(vec![
+          Ok(RecursiveLoadEvent::Fetch(source_code_info)),
+          Ok(RecursiveLoadEvent::Instantiate(mod_id)),
+        ]);
+        Box::new(stream)
       });
 
       // Instantiate mod_b
@@ -974,18 +1059,18 @@ pub mod tests {
       js_check(isolate.execute(
         "dyn_import3.js",
         r#"
-        (async () => {
-          let mod = await import("foo1.js");
-          if (mod.b() !== 'b') {
-            throw Error("bad1");
-          }
-          // And again!
-          mod = await import("foo2.js");
-          if (mod.b() !== 'b') {
-            throw Error("bad2");
-          }
-        })();
-        "#,
+          (async () => {
+            let mod = await import("foo1.js");
+            if (mod.b() !== 'b') {
+              throw Error("bad1");
+            }
+            // And again!
+            mod = await import("foo2.js");
+            if (mod.b() !== 'b') {
+              throw Error("bad2");
+            }
+          })();
+          "#,
       ));
 
       assert_eq!(count.load(Ordering::Relaxed), 1);
@@ -1073,10 +1158,10 @@ pub mod tests {
       "overflow_req_sync.js",
       r#"
         let asyncRecv = 0;
-        Deno.core.setAsyncHandler((buf) => { asyncRecv++ });
+        Deno.core.setAsyncHandler((opId, buf) => { asyncRecv++ });
         // Large message that will overflow the shared space.
         let control = new Uint8Array(100 * 1024 * 1024);
-        let response = Deno.core.dispatch(control);
+        let response = Deno.core.dispatch(99, control);
         assert(response instanceof Uint8Array);
         assert(response.length == 1);
         assert(response[0] == 43);
@@ -1095,10 +1180,10 @@ pub mod tests {
       "overflow_res_sync.js",
       r#"
         let asyncRecv = 0;
-        Deno.core.setAsyncHandler((buf) => { asyncRecv++ });
+        Deno.core.setAsyncHandler((opId, buf) => { asyncRecv++ });
         // Large message that will overflow the shared space.
         let control = new Uint8Array([42]);
-        let response = Deno.core.dispatch(control);
+        let response = Deno.core.dispatch(99, control);
         assert(response instanceof Uint8Array);
         assert(response.length == 100 * 1024 * 1024);
         assert(response[0] == 99);
@@ -1116,21 +1201,22 @@ pub mod tests {
         "overflow_req_async.js",
         r#"
         let asyncRecv = 0;
-        Deno.core.setAsyncHandler((buf) => {
+        Deno.core.setAsyncHandler((opId, buf) => {
+          assert(opId == 99);
           assert(buf.byteLength === 1);
           assert(buf[0] === 43);
           asyncRecv++;
         });
         // Large message that will overflow the shared space.
         let control = new Uint8Array(100 * 1024 * 1024);
-        let response = Deno.core.dispatch(control);
+        let response = Deno.core.dispatch(99, control);
         // Async messages always have null response.
         assert(response == null);
         assert(asyncRecv == 0);
         "#,
       ));
       assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
-      assert_eq!(Async::Ready(()), isolate.poll().unwrap());
+      assert_eq!(Async::Ready(()), js_check(isolate.poll()));
       js_check(isolate.execute("check.js", "assert(asyncRecv == 1);"));
     });
   }
@@ -1145,14 +1231,15 @@ pub mod tests {
         "overflow_res_async.js",
         r#"
         let asyncRecv = 0;
-        Deno.core.setAsyncHandler((buf) => {
+        Deno.core.setAsyncHandler((opId, buf) => {
+          assert(opId == 99);
           assert(buf.byteLength === 100 * 1024 * 1024);
           assert(buf[0] === 4);
           asyncRecv++;
         });
         // Large message that will overflow the shared space.
         let control = new Uint8Array([42]);
-        let response = Deno.core.dispatch(control);
+        let response = Deno.core.dispatch(99, control);
         assert(response == null);
         assert(asyncRecv == 0);
         "#,
@@ -1173,19 +1260,20 @@ pub mod tests {
         "overflow_res_multiple_dispatch_async.js",
         r#"
         let asyncRecv = 0;
-        Deno.core.setAsyncHandler((buf) => {
+        Deno.core.setAsyncHandler((opId, buf) => {
+          assert(opId === 99);
           assert(buf.byteLength === 100 * 1024 * 1024);
           assert(buf[0] === 4);
           asyncRecv++;
         });
         // Large message that will overflow the shared space.
         let control = new Uint8Array([42]);
-        let response = Deno.core.dispatch(control);
+        let response = Deno.core.dispatch(99, control);
         assert(response == null);
         assert(asyncRecv == 0);
         // Dispatch another message to verify that pending ops
         // are done even if shared space overflows
-        Deno.core.dispatch(control);
+        Deno.core.dispatch(99, control);
         "#,
       ));
       assert_eq!(dispatch_count.load(Ordering::Relaxed), 2);

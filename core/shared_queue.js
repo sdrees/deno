@@ -26,11 +26,15 @@ SharedQueue Binary Layout
   const INDEX_NUM_SHIFTED_OFF = 1;
   const INDEX_HEAD = 2;
   const INDEX_OFFSETS = 3;
-  const INDEX_RECORDS = 3 + MAX_RECORDS;
+  const INDEX_RECORDS = INDEX_OFFSETS + 2 * MAX_RECORDS;
   const HEAD_INIT = 4 * INDEX_RECORDS;
 
+  // Available on start due to bindings.
   const Deno = window[GLOBAL_NAMESPACE];
   const core = Deno[CORE_NAMESPACE];
+  // Warning: DO NOT use window.Deno after this point.
+  // It is possible that the Deno namespace has been deleted.
+  // Use the above local Deno and core variable instead.
 
   let sharedBytes;
   let shared32;
@@ -80,13 +84,17 @@ SharedQueue Binary Layout
     return shared32[INDEX_NUM_RECORDS] - shared32[INDEX_NUM_SHIFTED_OFF];
   }
 
-  function setEnd(index, end) {
-    shared32[INDEX_OFFSETS + index] = end;
+  // TODO(ry) rename to setMeta
+  function setMeta(index, end, opId) {
+    shared32[INDEX_OFFSETS + 2 * index] = end;
+    shared32[INDEX_OFFSETS + 2 * index + 1] = opId;
   }
 
-  function getEnd(index) {
+  function getMeta(index) {
     if (index < numRecords()) {
-      return shared32[INDEX_OFFSETS + index];
+      const buf = shared32[INDEX_OFFSETS + 2 * index];
+      const opId = shared32[INDEX_OFFSETS + 2 * index + 1];
+      return [opId, buf];
     } else {
       return null;
     }
@@ -97,14 +105,14 @@ SharedQueue Binary Layout
       if (index == 0) {
         return HEAD_INIT;
       } else {
-        return shared32[INDEX_OFFSETS + index - 1];
+        return shared32[INDEX_OFFSETS + 2 * (index - 1)];
       }
     } else {
       return null;
     }
   }
 
-  function push(buf) {
+  function push(opId, buf) {
     let off = head();
     let end = off + buf.byteLength;
     let index = numRecords();
@@ -112,7 +120,7 @@ SharedQueue Binary Layout
       // console.log("shared_queue.js push fail");
       return false;
     }
-    setEnd(index, end);
+    setMeta(index, end, opId);
     assert(end - off == buf.byteLength);
     sharedBytes.set(buf, off);
     shared32[INDEX_NUM_RECORDS] += 1;
@@ -128,8 +136,8 @@ SharedQueue Binary Layout
       return null;
     }
 
-    let off = getOffset(i);
-    let end = getEnd(i);
+    const off = getOffset(i);
+    const [opId, end] = getMeta(i);
 
     if (size() > 1) {
       shared32[INDEX_NUM_SHIFTED_OFF] += 1;
@@ -139,7 +147,8 @@ SharedQueue Binary Layout
 
     assert(off != null);
     assert(end != null);
-    return sharedBytes.subarray(off, end);
+    const buf = sharedBytes.subarray(off, end);
+    return [opId, buf];
   }
 
   let asyncHandler;
@@ -149,23 +158,24 @@ SharedQueue Binary Layout
     asyncHandler = cb;
   }
 
-  function handleAsyncMsgFromRust(buf) {
+  function handleAsyncMsgFromRust(opId, buf) {
     if (buf) {
-      asyncHandler(buf);
+      // This is the overflow_response case of deno::Isolate::poll().
+      asyncHandler(opId, buf);
     } else {
-      while ((buf = shift()) != null) {
-        asyncHandler(buf);
+      while (true) {
+        let opIdBuf = shift();
+        if (opIdBuf == null) {
+          break;
+        }
+        asyncHandler(...opIdBuf);
       }
     }
   }
 
-  function dispatch(control, zeroCopy = null) {
+  function dispatch(opId, control, zeroCopy = null) {
     maybeInit();
-    // First try to push control to shared.
-    const success = push(control);
-    // If successful, don't use first argument of core.send.
-    const arg0 = success ? null : control;
-    return window.Deno.core.send(arg0, zeroCopy);
+    return Deno.core.send(opId, control, zeroCopy);
   }
 
   const denoCore = {

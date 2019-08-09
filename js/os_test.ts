@@ -39,6 +39,34 @@ test(function osIsTTYSmoke(): void {
   console.log(Deno.isTTY());
 });
 
-test(function homeDir(): void {
+testPerm({ env: true }, function homeDir(): void {
   assertNotEquals(Deno.homeDir(), "");
+});
+
+testPerm({ env: false }, function homeDirPerm(): void {
+  let caughtError = false;
+  try {
+    Deno.homeDir();
+  } catch (err) {
+    caughtError = true;
+    assertEquals(err.kind, Deno.ErrorKind.PermissionDenied);
+    assertEquals(err.name, "PermissionDenied");
+  }
+  assert(caughtError);
+});
+
+testPerm({ env: true }, function execPath(): void {
+  assertNotEquals(Deno.execPath(), "");
+});
+
+testPerm({ env: false }, function execPathPerm(): void {
+  let caughtError = false;
+  try {
+    Deno.execPath();
+  } catch (err) {
+    caughtError = true;
+    assertEquals(err.kind, Deno.ErrorKind.PermissionDenied);
+    assertEquals(err.name, "PermissionDenied");
+  }
+  assert(caughtError);
 });

@@ -13,14 +13,10 @@ export let pid: number;
 /** Reflects the NO_COLOR environment variable: https://no-color.org/ */
 export let noColor: boolean;
 
-/** Path to the current deno process's executable file. */
-export let execPath: string;
-
-function setGlobals(pid_: number, noColor_: boolean, execPath_: string): void {
+function setGlobals(pid_: number, noColor_: boolean): void {
   assert(!pid);
   pid = pid_;
   noColor = noColor_;
-  execPath = execPath_;
 }
 
 /** Check if running in terminal.
@@ -112,7 +108,10 @@ function sendStart(): msg.StartRes {
 // This function bootstraps an environment within Deno, it is shared both by
 // the runtime and the compiler environments.
 // @internal
-export function start(source?: string): msg.StartRes {
+export function start(
+  preserveDenoNamespace = true,
+  source?: string
+): msg.StartRes {
   core.setAsyncHandler(handleAsyncMsgFromRust);
 
   // First we send an empty `Start` message to let the privileged side know we
@@ -122,18 +121,27 @@ export function start(source?: string): msg.StartRes {
 
   util.setLogDebug(startResMsg.debugFlag(), source);
 
-  setGlobals(startResMsg.pid(), startResMsg.noColor(), startResMsg.execPath()!);
+  setGlobals(startResMsg.pid(), startResMsg.noColor());
 
-  // Deno.core could ONLY be safely frozen here (not in globals.ts)
-  // since shared_queue.js will modify core properties.
-  Object.freeze(window.Deno.core);
+  if (preserveDenoNamespace) {
+    util.immutableDefine(window, "Deno", window.Deno);
+    // Deno.core could ONLY be safely frozen here (not in globals.ts)
+    // since shared_queue.js will modify core properties.
+    Object.freeze(window.Deno.core);
+    // core.sharedQueue is an object so we should also freeze it.
+    Object.freeze(window.Deno.core.sharedQueue);
+  } else {
+    // Remove window.Deno
+    delete window.Deno;
+    assert(window.Deno === undefined);
+  }
 
   return startResMsg;
 }
 
 /**
  * Returns the current user's home directory.
- * Does not require elevated privileges.
+ * Requires the `--allow-env` flag.
  */
 export function homeDir(): string {
   const builder = flatbuffers.createBuilder();
@@ -148,5 +156,20 @@ export function homeDir(): string {
     throw new Error("Could not get home directory.");
   }
 
+  return path;
+}
+
+/**
+ * Returns the path to the current deno executable.
+ * Requires the `--allow-env` flag.
+ */
+export function execPath(): string {
+  const builder = flatbuffers.createBuilder();
+  const inner = msg.ExecPath.createExecPath(builder);
+  const baseRes = sendSync(builder, msg.Any.ExecPath, inner)!;
+  assert(msg.Any.ExecPathRes === baseRes.innerType());
+  const res = new msg.ExecPathRes();
+  assert(baseRes.inner(res) != null);
+  const path = res.path()!;
   return path;
 }

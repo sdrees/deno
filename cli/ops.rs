@@ -27,14 +27,7 @@ use crate::tokio_write;
 use crate::version;
 use crate::worker::Worker;
 use atty;
-use deno::Buf;
-use deno::CoreOp;
-use deno::ErrBox;
-use deno::Loader;
-use deno::ModuleSpecifier;
-use deno::Op;
-use deno::OpResult;
-use deno::PinnedBuf;
+use deno::*;
 use flatbuffers::FlatBufferBuilder;
 use futures;
 use futures::Async;
@@ -82,16 +75,20 @@ fn empty_buf() -> Buf {
   Box::new([])
 }
 
+const FLATBUFFER_OP_ID: OpId = 44;
+
 pub fn dispatch_all(
   state: &ThreadSafeState,
+  op_id: OpId,
   control: &[u8],
   zero_copy: Option<PinnedBuf>,
   op_selector: OpSelector,
 ) -> CoreOp {
   let bytes_sent_control = control.len();
   let bytes_sent_zero_copy = zero_copy.as_ref().map(|b| b.len()).unwrap_or(0);
-  let op = if let Some(min_record) = parse_min_record(control) {
-    dispatch_minimal(state, min_record, zero_copy)
+  let op = if op_id != FLATBUFFER_OP_ID {
+    let min_record = parse_min_record(control).unwrap();
+    dispatch_minimal(state, op_id, min_record, zero_copy)
   } else {
     dispatch_all_legacy(state, control, zero_copy, op_selector)
   };
@@ -212,6 +209,7 @@ pub fn op_selector_std(inner_type: msg::Any) -> Option<CliDispatchFn> {
     msg::Any::Cwd => Some(op_cwd),
     msg::Any::Dial => Some(op_dial),
     msg::Any::Environ => Some(op_env),
+    msg::Any::ExecPath => Some(op_exec_path),
     msg::Any::Exit => Some(op_exit),
     msg::Any::Fetch => Some(op_fetch),
     msg::Any::FetchSourceFile => Some(op_fetch_source_file),
@@ -354,13 +352,6 @@ fn op_start(
   let cwd_off =
     builder.create_string(deno_fs::normalize_path(cwd_path.as_ref()).as_ref());
 
-  let current_exe = std::env::current_exe().unwrap();
-  // Now apply URL parser to current exe to get fully resolved path, otherwise we might get
-  // `./` and `../` bits in `exec_path`
-  let exe_url = Url::from_file_path(current_exe).unwrap();
-  let exec_path =
-    builder.create_string(exe_url.to_file_path().unwrap().to_str().unwrap());
-
   let v8_version = version::v8();
   let v8_version_off = builder.create_string(v8_version);
 
@@ -394,7 +385,6 @@ fn op_start(
       v8_version: Some(v8_version_off),
       deno_version: Some(deno_version_off),
       no_color: !ansi::use_color(),
-      exec_path: Some(exec_path),
       xeval_delim,
       ..Default::default()
     },
@@ -1048,10 +1038,12 @@ fn op_close(
 }
 
 fn op_kill(
-  _state: &ThreadSafeState,
+  state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
 ) -> CliOpResult {
+  state.check_run()?;
+
   assert!(data.is_none());
   let inner = base.inner_as_kill().unwrap();
   let pid = inner.pid();
@@ -1751,12 +1743,14 @@ fn op_metrics(
 }
 
 fn op_home_dir(
-  _state: &ThreadSafeState,
+  state: &ThreadSafeState,
   base: &msg::Base<'_>,
   data: Option<PinnedBuf>,
 ) -> CliOpResult {
   assert!(data.is_none());
   let cmd_id = base.cmd_id();
+
+  state.check_env()?;
 
   let builder = &mut FlatBufferBuilder::new();
   let path = dirs::home_dir()
@@ -1773,6 +1767,36 @@ fn op_home_dir(
     msg::BaseArgs {
       inner: Some(inner.as_union_value()),
       inner_type: msg::Any::HomeDirRes,
+      ..Default::default()
+    },
+  ))
+}
+
+fn op_exec_path(
+  state: &ThreadSafeState,
+  base: &msg::Base<'_>,
+  data: Option<PinnedBuf>,
+) -> CliOpResult {
+  assert!(data.is_none());
+  let cmd_id = base.cmd_id();
+
+  state.check_env()?;
+
+  let builder = &mut FlatBufferBuilder::new();
+  let current_exe = std::env::current_exe().unwrap();
+  // Now apply URL parser to current exe to get fully resolved path, otherwise we might get
+  // `./` and `../` bits in `exec_path`
+  let exe_url = Url::from_file_path(current_exe).unwrap();
+  let path = exe_url.to_file_path().unwrap().to_str().unwrap().to_owned();
+  let path = Some(builder.create_string(&path));
+  let inner = msg::ExecPathRes::create(builder, &msg::ExecPathResArgs { path });
+
+  ok_buf(serialize_response(
+    cmd_id,
+    builder,
+    msg::BaseArgs {
+      inner: Some(inner.as_union_value()),
+      inner_type: msg::Any::ExecPathRes,
       ..Default::default()
     },
   ))
@@ -2062,46 +2086,69 @@ fn op_create_worker(
   let cmd_id = base.cmd_id();
   let inner = base.inner_as_create_worker().unwrap();
   let specifier = inner.specifier().unwrap();
+  // Only include deno namespace if requested AND current worker
+  // has included namespace (to avoid escalation).
+  let include_deno_namespace =
+    inner.include_deno_namespace() && state.include_deno_namespace;
+  let has_source_code = inner.has_source_code();
+  let source_code = inner.source_code().unwrap();
 
   let parent_state = state.clone();
 
+  let mut module_specifier = ModuleSpecifier::resolve_url_or_path(specifier)?;
+
+  let mut child_argv = parent_state.argv.clone();
+
+  if !has_source_code {
+    if let Some(module) = state.main_module() {
+      module_specifier =
+        ModuleSpecifier::resolve_import(specifier, &module.to_string())?;
+      child_argv[1] = module_specifier.to_string();
+    }
+  }
+
   let child_state = ThreadSafeState::new(
     parent_state.flags.clone(),
-    parent_state.argv.clone(),
+    child_argv,
     op_selector_std,
     parent_state.progress.clone(),
+    include_deno_namespace,
   )?;
   let rid = child_state.resource.rid;
   let name = format!("USER-WORKER-{}", specifier);
+  let deno_main_call = format!("denoMain({})", include_deno_namespace);
 
   let mut worker =
     Worker::new(name, startup_data::deno_isolate_init(), child_state);
-  worker.execute("denoMain()").unwrap();
+  worker.execute(&deno_main_call).unwrap();
   worker.execute("workerMain()").unwrap();
 
-  let module_specifier = ModuleSpecifier::resolve_url_or_path(specifier)?;
+  let exec_cb = move |worker: Worker| {
+    let mut workers_tl = parent_state.workers.lock().unwrap();
+    workers_tl.insert(rid, worker.shared());
+    let builder = &mut FlatBufferBuilder::new();
+    let msg_inner =
+      msg::CreateWorkerRes::create(builder, &msg::CreateWorkerResArgs { rid });
+    serialize_response(
+      cmd_id,
+      builder,
+      msg::BaseArgs {
+        inner: Some(msg_inner.as_union_value()),
+        inner_type: msg::Any::CreateWorkerRes,
+        ..Default::default()
+      },
+    )
+  };
 
-  let op =
-    worker
-      .execute_mod_async(&module_specifier, false)
-      .and_then(move |()| {
-        let mut workers_tl = parent_state.workers.lock().unwrap();
-        workers_tl.insert(rid, worker.shared());
-        let builder = &mut FlatBufferBuilder::new();
-        let msg_inner = msg::CreateWorkerRes::create(
-          builder,
-          &msg::CreateWorkerResArgs { rid },
-        );
-        Ok(serialize_response(
-          cmd_id,
-          builder,
-          msg::BaseArgs {
-            inner: Some(msg_inner.as_union_value()),
-            inner_type: msg::Any::CreateWorkerRes,
-            ..Default::default()
-          },
-        ))
-      });
+  // Has provided source code, execute immediately.
+  if has_source_code {
+    worker.execute(&source_code).unwrap();
+    return ok_buf(exec_cb(worker));
+  }
+
+  let op = worker
+    .execute_mod_async(&module_specifier, false)
+    .and_then(move |()| Ok(exec_cb(worker)));
 
   let result = op.wait()?;
   Ok(Op::Sync(result))
