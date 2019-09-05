@@ -5,6 +5,7 @@ use crate::deno_error::ErrorKind;
 use crate::deno_error::GetErrorKind;
 use crate::disk_cache::DiskCache;
 use crate::http_util;
+use crate::http_util::FetchOnceResult;
 use crate::msg;
 use crate::progress::Progress;
 use crate::tokio_util;
@@ -12,7 +13,6 @@ use deno::ErrBox;
 use deno::ModuleSpecifier;
 use futures::future::Either;
 use futures::Future;
-use http;
 use serde_json;
 use std;
 use std::collections::HashMap;
@@ -21,7 +21,6 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::result::Result;
 use std::str;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use url;
@@ -213,7 +212,12 @@ impl SourceFileFetcher {
     self: &Self,
     module_url: &Url,
   ) -> Result<SourceFile, ErrBox> {
-    let filepath = module_url.to_file_path().expect("File URL expected");
+    let filepath = module_url.to_file_path().map_err(|()| {
+      ErrBox::from(DenoError::new(
+        ErrorKind::InvalidPath,
+        "File URL contains invalid path".to_owned(),
+      ))
+    })?;
 
     let source_code = match fs::read(filepath.clone()) {
       Ok(c) => c,
@@ -300,8 +304,6 @@ impl SourceFileFetcher {
     no_remote_fetch: bool,
     redirect_limit: i64,
   ) -> Box<SourceFileFuture> {
-    use crate::http_util::FetchOnceResult;
-
     if redirect_limit < 0 {
       return Box::new(futures::future::err(too_many_redirects()));
     }
@@ -337,20 +339,14 @@ impl SourceFileFetcher {
     }
 
     let download_job = self.progress.add("Download", &module_url.to_string());
-
-    let module_uri = url_into_uri(&module_url);
-
     let dir = self.clone();
     let module_url = module_url.clone();
 
     // Single pass fetch, either yields code or yields redirect.
-    let f =
-      http_util::fetch_string_once(module_uri).and_then(move |r| match r {
-        FetchOnceResult::Redirect(uri) => {
+    let f = http_util::fetch_string_once(&module_url).and_then(move |r| {
+      match r {
+        FetchOnceResult::Redirect(new_module_url) => {
           // If redirects, update module_name and filename for next looped call.
-          let new_module_url = Url::parse(&uri.to_string())
-            .expect("http::uri::Uri should be parseable as Url");
-
           dir
             .save_source_code_headers(
               &module_url,
@@ -404,7 +400,8 @@ impl SourceFileFetcher {
 
           Either::B(futures::future::ok(source_file))
         }
-      });
+      }
+    });
 
     Box::new(f)
   }
@@ -534,11 +531,6 @@ fn filter_shebang(bytes: Vec<u8>) -> Vec<u8> {
   }
 }
 
-fn url_into_uri(url: &url::Url) -> http::uri::Uri {
-  http::uri::Uri::from_str(&url.to_string())
-    .expect("url::Url should be parseable as http::uri::Uri")
-}
-
 #[derive(Debug, Default)]
 /// Header metadata associated with a particular "symbolic" source code file.
 /// (the associated source code file might not be cached, while remaining
@@ -551,8 +543,8 @@ pub struct SourceCodeHeaders {
   pub redirect_to: Option<String>,
 }
 
-static MIME_TYPE: &'static str = "mime_type";
-static REDIRECT_TO: &'static str = "redirect_to";
+static MIME_TYPE: &str = "mime_type";
+static REDIRECT_TO: &str = "redirect_to";
 
 impl SourceCodeHeaders {
   pub fn from_json_string(headers_string: String) -> Self {
@@ -714,6 +706,20 @@ mod tests {
       headers2.redirect_to.clone().unwrap(),
       "http://deno.land/a.js"
     );
+  }
+
+  #[test]
+  fn test_fetch_local_file_no_panic() {
+    let (_temp_dir, fetcher) = test_setup();
+    if cfg!(windows) {
+      // Should fail: missing drive letter.
+      let u = Url::parse("file:///etc/passwd").unwrap();
+      fetcher.fetch_local_file(&u).unwrap_err();
+    } else {
+      // Should fail: local network paths are not supported on unix.
+      let u = Url::parse("file://server/etc/passwd").unwrap();
+      fetcher.fetch_local_file(&u).unwrap_err();
+    }
   }
 
   #[test]
@@ -1256,9 +1262,13 @@ mod tests {
       let r = fetcher.fetch_source_file(&specifier);
       assert!(r.is_err());
 
-      // Assuming cwd is the deno repo root.
+      let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("js/main.ts")
+        .to_owned();
       let specifier =
-        ModuleSpecifier::resolve_url_or_path("js/main.ts").unwrap();
+        ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap()).unwrap();
       let r = fetcher.fetch_source_file(&specifier);
       assert!(r.is_ok());
     })
@@ -1276,9 +1286,13 @@ mod tests {
       let r = fetcher.fetch_source_file(&specifier);
       assert!(r.is_err());
 
-      // Assuming cwd is the deno repo root.
+      let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("js/main.ts")
+        .to_owned();
       let specifier =
-        ModuleSpecifier::resolve_url_or_path("js/main.ts").unwrap();
+        ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap()).unwrap();
       let r = fetcher.fetch_source_file(&specifier);
       assert!(r.is_ok());
     })

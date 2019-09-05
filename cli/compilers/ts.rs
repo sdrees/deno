@@ -1,13 +1,11 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use crate::compilers::CompiledModule;
 use crate::compilers::CompiledModuleFuture;
-use crate::deno_error::DenoError;
 use crate::diagnostics::Diagnostic;
 use crate::disk_cache::DiskCache;
 use crate::file_fetcher::SourceFile;
 use crate::file_fetcher::SourceFileFetcher;
 use crate::msg;
-use crate::msg::ErrorKind;
 use crate::resources;
 use crate::source_maps::SourceMapGetter;
 use crate::startup_data;
@@ -19,6 +17,7 @@ use deno::ErrBox;
 use deno::ModuleSpecifier;
 use futures::Future;
 use futures::Stream;
+use regex::Regex;
 use ring;
 use std::collections::HashSet;
 use std::fmt::Write;
@@ -29,6 +28,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use url::Url;
 
+lazy_static! {
+  static ref CHECK_JS_RE: Regex =
+    Regex::new(r#""checkJs"\s*?:\s*?true"#).unwrap();
+}
+
 /// Struct which represents the state of the compiler
 /// configuration where the first is canonical name for the configuration file,
 /// second is a vector of the bytes of the contents of the configuration file,
@@ -38,6 +42,7 @@ pub struct CompilerConfig {
   pub path: Option<PathBuf>,
   pub content: Option<Vec<u8>>,
   pub hash: Vec<u8>,
+  pub compile_js: bool,
 }
 
 impl CompilerConfig {
@@ -74,32 +79,23 @@ impl CompilerConfig {
       _ => b"".to_vec(),
     };
 
+    // If `checkJs` is set to true in `compilerOptions` then we're gonna be compiling
+    // JavaScript files as well
+    let compile_js = if let Some(config_content) = config.clone() {
+      let config_str = std::str::from_utf8(&config_content)?;
+      CHECK_JS_RE.is_match(config_str)
+    } else {
+      false
+    };
+
     let ts_config = Self {
       path: config_path,
       content: config,
       hash: config_hash,
+      compile_js,
     };
 
     Ok(ts_config)
-  }
-
-  pub fn json(self: &Self) -> Result<serde_json::Value, ErrBox> {
-    if self.content.is_none() {
-      return Ok(serde_json::Value::Null);
-    }
-
-    let bytes = self.content.clone().unwrap();
-    let json_string = std::str::from_utf8(&bytes)?;
-    match serde_json::from_str(&json_string) {
-      Ok(json_map) => Ok(json_map),
-      Err(_) => Err(
-        DenoError::new(
-          ErrorKind::InvalidInput,
-          "Compiler config is not a valid JSON".to_string(),
-        )
-        .into(),
-      ),
-    }
   }
 }
 
@@ -112,8 +108,8 @@ pub struct CompiledFileMetadata {
   pub version_hash: String,
 }
 
-static SOURCE_PATH: &'static str = "source_path";
-static VERSION_HASH: &'static str = "version_hash";
+static SOURCE_PATH: &str = "source_path";
+static VERSION_HASH: &str = "version_hash";
 
 impl CompiledFileMetadata {
   pub fn from_json_string(metadata_string: String) -> Option<Self> {
@@ -169,7 +165,7 @@ fn req(
 }
 
 fn gen_hash(v: Vec<&[u8]>) -> String {
-  let mut ctx = ring::digest::Context::new(&ring::digest::SHA1);
+  let mut ctx = ring::digest::Context::new(&ring::digest::SHA256);
   for src in v.iter() {
     ctx.update(src);
   }
@@ -182,7 +178,7 @@ fn gen_hash(v: Vec<&[u8]>) -> String {
   out
 }
 
-/// Emit a SHA1 hash based on source code, deno version and TS config.
+/// Emit a SHA256 hash based on source code, deno version and TS config.
 /// Used to check if a recompilation for source code is needed.
 pub fn source_code_version_hash(
   source_code: &[u8],
@@ -215,24 +211,13 @@ impl TsCompiler {
   ) -> Result<Self, ErrBox> {
     let config = CompilerConfig::load(config_path)?;
 
-    // If `checkJs` is set to true in `compilerOptions` then we're gonna be compiling
-    // JavaScript files as well
-    let config_json = config.json()?;
-    let compile_js = match &config_json.get("compilerOptions") {
-      Some(serde_json::Value::Object(m)) => match m.get("checkJs") {
-        Some(serde_json::Value::Bool(bool_)) => *bool_,
-        _ => false,
-      },
-      _ => false,
-    };
-
     let compiler = Self {
       file_fetcher,
       disk_cache,
+      compile_js: config.compile_js,
       config,
       compiled: Mutex::new(HashSet::new()),
       use_disk_cache,
-      compile_js,
     };
 
     Ok(compiler)
@@ -420,7 +405,7 @@ impl TsCompiler {
           .get_compiled_module(&source_file_.url)
           .map_err(|e| {
             // TODO: this situation shouldn't happen
-            panic!("Expected to find compiled file: {}", e)
+            panic!("Expected to find compiled file: {} {}", e, source_file_.url)
           })
       })
       .and_then(move |compiled_module| {
@@ -654,9 +639,11 @@ impl TsCompiler {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::fs as deno_fs;
   use crate::tokio_util;
   use deno::ModuleSpecifier;
   use std::path::PathBuf;
+  use tempfile::TempDir;
 
   impl TsCompiler {
     fn compile_sync(
@@ -671,18 +658,23 @@ mod tests {
   #[test]
   fn test_compile_sync() {
     tokio_util::init(|| {
+      let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("tests/002_hello.ts")
+        .to_owned();
       let specifier =
-        ModuleSpecifier::resolve_url_or_path("./tests/002_hello.ts").unwrap();
+        ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap()).unwrap();
 
       let out = SourceFile {
         url: specifier.as_url().clone(),
-        filename: PathBuf::from("/tests/002_hello.ts"),
+        filename: PathBuf::from(p.to_str().unwrap().to_string()),
         media_type: msg::MediaType::TypeScript,
         source_code: include_bytes!("../../tests/002_hello.ts").to_vec(),
       };
 
       let mock_state = ThreadSafeState::mock(vec![
-        String::from("./deno"),
+        String::from("deno"),
         String::from("hello.js"),
       ]);
       let compiled = mock_state
@@ -698,15 +690,19 @@ mod tests {
 
   #[test]
   fn test_bundle_async() {
-    let specifier = "./tests/002_hello.ts";
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .unwrap()
+      .join("tests/002_hello.ts")
+      .to_owned();
     use deno::ModuleSpecifier;
-    let module_name = ModuleSpecifier::resolve_url_or_path(specifier)
+    let module_name = ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap())
       .unwrap()
       .to_string();
 
     let state = ThreadSafeState::mock(vec![
-      String::from("./deno"),
-      String::from("./tests/002_hello.ts"),
+      String::from("deno"),
+      p.to_string_lossy().into(),
       String::from("$deno$/bundle.js"),
     ]);
     let out = state.ts_compiler.bundle_async(
@@ -720,23 +716,61 @@ mod tests {
   #[test]
   fn test_source_code_version_hash() {
     assert_eq!(
-      "08574f9cdeb94fd3fb9cdc7a20d086daeeb42bca",
+      "0185b42de0686b4c93c314daaa8dee159f768a9e9a336c2a5e3d5b8ca6c4208c",
       source_code_version_hash(b"1+2", "0.4.0", b"{}")
     );
     // Different source_code should result in different hash.
     assert_eq!(
-      "d8abe2ead44c3ff8650a2855bf1b18e559addd06",
+      "e58631f1b6b6ce2b300b133ec2ad16a8a5ba6b7ecf812a8c06e59056638571ac",
       source_code_version_hash(b"1", "0.4.0", b"{}")
     );
     // Different version should result in different hash.
     assert_eq!(
-      "d6feffc5024d765d22c94977b4fe5975b59d6367",
+      "307e6200347a88dbbada453102deb91c12939c65494e987d2d8978f6609b5633",
       source_code_version_hash(b"1", "0.1.0", b"{}")
     );
     // Different config should result in different hash.
     assert_eq!(
-      "3b35db249b26a27decd68686f073a58266b2aec2",
+      "195eaf104a591d1d7f69fc169c60a41959c2b7a21373cd23a8f675f877ec385f",
       source_code_version_hash(b"1", "0.4.0", b"{\"compilerOptions\": {}}")
     );
+  }
+
+  #[test]
+  fn test_compile_js() {
+    let temp_dir = TempDir::new().expect("tempdir fail");
+    let temp_dir_path = temp_dir.path();
+
+    let test_cases = vec![
+      // valid JSON
+      (
+        r#"{ "compilerOptions": { "checkJs": true } } "#,
+        true,
+      ),
+      // JSON with comment
+      (
+        r#"{ "compilerOptions": { // force .js file compilation by Deno "checkJs": true } } "#,
+        true,
+      ),
+      // invalid JSON
+      (
+        r#"{ "compilerOptions": { "checkJs": true },{ } "#,
+        true,
+      ),
+      // without content
+      (
+        "",
+        false,
+      ),
+    ];
+
+    let path = temp_dir_path.join("tsconfig.json");
+    let path_str = path.to_str().unwrap().to_string();
+
+    for (json_str, expected) in test_cases {
+      deno_fs::write_file(&path, json_str.as_bytes(), 0o666).unwrap();
+      let config = CompilerConfig::load(Some(path_str.clone())).unwrap();
+      assert_eq!(config.compile_js, expected);
+    }
   }
 }

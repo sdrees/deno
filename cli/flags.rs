@@ -259,8 +259,17 @@ The declaration file could be saved and used for typing information.",
         ),
     ).subcommand(
       SubCommand::with_name("info")
-        .about("Show source file related info")
-        .long_about("Show source file related info.
+        .about("Show info about cache or info related to source file")
+        .long_about("Show info about cache or info related to source file.
+
+  deno info
+
+The following information is shown:
+
+  DENO_DIR:                  location of directory containing Deno-related files
+  Remote modules cache:      location of directory containing remote modules
+  TypeScript compiler cache: location of directory containing TS compiler output
+
 
   deno info https://deno.land/std@v0.11/http/file_server.ts
 
@@ -271,7 +280,7 @@ The following information is shown:
   compiled: TypeScript only. shown local path of compiled source code.
   map:      TypeScript only. shown local path of source map.
   deps:     Dependency tree of the source file.",
-        ).arg(Arg::with_name("file").takes_value(true).required(true)),
+        ).arg(Arg::with_name("file").takes_value(true).required(false)),
     ).subcommand(
       SubCommand::with_name("eval")
         .about("Eval script")
@@ -301,6 +310,40 @@ Automatically downloads Prettier dependencies on first run.
             .takes_value(true)
             .multiple(true)
             .required(true),
+        ),
+    ).subcommand(
+      add_run_args(SubCommand::with_name("test"))
+        .about("Run tests")
+        .long_about(
+"Run tests using test runner
+
+Automatically downloads test runner on first run.
+
+  deno test **/*_test.ts **/test.ts",
+        ).arg(
+          Arg::with_name("failfast")
+            .short("f")
+            .long("failfast")
+            .help("Stop on first error")
+            .takes_value(false),
+        ).arg(
+          Arg::with_name("quiet")
+            .short("q")
+            .long("quiet")
+            .help("Don't show output from test cases")
+            .takes_value(false)
+        ).arg(
+          Arg::with_name("exclude")
+            .short("e")
+            .long("exclude")
+            .help("List of file names to exclude from run")
+            .takes_value(true)
+            .multiple(true)
+        ).arg(
+          Arg::with_name("files")
+            .help("List of file names to run")
+            .takes_value(true)
+            .multiple(true)
         ),
     ).subcommand(
       add_run_args(SubCommand::with_name("run"))
@@ -512,6 +555,10 @@ pub fn parse_flags(
   if let Some(run_matches) = matches.subcommand_matches("run") {
     flags = parse_run_args(flags.clone(), run_matches);
   }
+  // flags specific to "test" subcommand
+  if let Some(test_matches) = matches.subcommand_matches("test") {
+    flags = parse_run_args(flags.clone(), test_matches);
+  }
 
   flags
 }
@@ -634,6 +681,8 @@ fn parse_script_args(
 const PRETTIER_URL: &str = "https://deno.land/std@v0.11/prettier/main.ts";
 /// Used for `deno install...` subcommand
 const INSTALLER_URL: &str = "https://deno.land/std@v0.11/installer/mod.ts";
+/// Used for `deno test...` subcommand
+const TEST_RUNNER_URL: &str = "https://deno.land/std@4531fa8/testing/runner.ts";
 
 /// These are currently handled subcommands.
 /// There is no "Help" subcommand because it's handled by `clap::App` itself.
@@ -644,7 +693,6 @@ pub enum DenoSubcommand {
   Eval,
   Fetch,
   Info,
-  Install,
   Repl,
   Run,
   Types,
@@ -748,8 +796,9 @@ pub fn flags_from_vec(
       DenoSubcommand::Run
     }
     ("info", Some(info_match)) => {
-      let file: &str = info_match.value_of("file").unwrap();
-      argv.extend(vec![file.to_string()]);
+      if info_match.is_present("file") {
+        argv.push(info_match.value_of("file").unwrap().to_string());
+      }
       DenoSubcommand::Info
     }
     ("install", Some(install_match)) => {
@@ -780,10 +829,44 @@ pub fn flags_from_vec(
               .collect();
             argv.extend(flags);
           }
-          DenoSubcommand::Install
+          DenoSubcommand::Run
         }
         _ => unreachable!(),
       }
+    }
+    ("test", Some(test_match)) => {
+      flags.allow_read = true;
+      argv.push(TEST_RUNNER_URL.to_string());
+
+      if test_match.is_present("quiet") {
+        argv.push("--quiet".to_string());
+      }
+
+      if test_match.is_present("failfast") {
+        argv.push("--failfast".to_string());
+      }
+
+      if test_match.is_present("exclude") {
+        argv.push("--exclude".to_string());
+        let exclude: Vec<String> = test_match
+          .values_of("exclude")
+          .unwrap()
+          .map(String::from)
+          .collect();
+        argv.extend(exclude);
+      }
+
+      if test_match.is_present("files") {
+        argv.push("--".to_string());
+        let files: Vec<String> = test_match
+          .values_of("files")
+          .unwrap()
+          .map(String::from)
+          .collect();
+        argv.extend(files);
+      }
+
+      DenoSubcommand::Run
     }
     ("types", Some(_)) => DenoSubcommand::Types,
     ("run", Some(run_match)) => {
@@ -1119,6 +1202,11 @@ mod tests {
     assert_eq!(flags, DenoFlags::default());
     assert_eq!(subcommand, DenoSubcommand::Info);
     assert_eq!(argv, svec!["deno", "script.ts"]);
+
+    let (flags, subcommand, argv) = flags_from_vec(svec!["deno", "info"]);
+    assert_eq!(flags, DenoFlags::default());
+    assert_eq!(subcommand, DenoSubcommand::Info);
+    assert_eq!(argv, svec!["deno"]);
   }
 
   #[test]
@@ -1464,7 +1552,7 @@ mod tests {
         ..DenoFlags::default()
       }
     );
-    assert_eq!(subcommand, DenoSubcommand::Install);
+    assert_eq!(subcommand, DenoSubcommand::Run);
     assert_eq!(
       argv,
       svec![
@@ -1494,7 +1582,7 @@ mod tests {
         ..DenoFlags::default()
       }
     );
-    assert_eq!(subcommand, DenoSubcommand::Install);
+    assert_eq!(subcommand, DenoSubcommand::Run);
     assert_eq!(
       argv,
       svec![
@@ -1528,7 +1616,7 @@ mod tests {
         ..DenoFlags::default()
       }
     );
-    assert_eq!(subcommand, DenoSubcommand::Install);
+    assert_eq!(subcommand, DenoSubcommand::Run);
     assert_eq!(
       argv,
       svec![
@@ -1653,5 +1741,34 @@ mod tests {
     );
     assert_eq!(subcommand, DenoSubcommand::Run);
     assert_eq!(argv, svec!["deno", "script.ts"])
+  }
+
+  #[test]
+  fn test_flags_from_vec_36() {
+    let (flags, subcommand, argv) = flags_from_vec(svec![
+      "deno",
+      "test",
+      "--exclude",
+      "some_dir/",
+      "**/*_test.ts"
+    ]);
+    assert_eq!(
+      flags,
+      DenoFlags {
+        allow_read: true,
+        ..DenoFlags::default()
+      }
+    );
+    assert_eq!(subcommand, DenoSubcommand::Run);
+    assert_eq!(
+      argv,
+      svec![
+        "deno",
+        TEST_RUNNER_URL,
+        "--exclude",
+        "some_dir/",
+        "**/*_test.ts"
+      ]
+    )
   }
 }

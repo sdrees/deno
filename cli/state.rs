@@ -4,6 +4,7 @@ use crate::compilers::JsCompiler;
 use crate::compilers::JsonCompiler;
 use crate::compilers::TsCompiler;
 use crate::deno_dir;
+use crate::deno_error::permission_denied;
 use crate::file_fetcher::SourceFileFetcher;
 use crate::flags;
 use crate::global_timer::GlobalTimer;
@@ -76,7 +77,6 @@ pub struct State {
   pub start_time: Instant,
   /// A reference to this worker's resource.
   pub resource: resources::Resource,
-  pub dispatch_selector: ops::OpSelector,
   /// Reference to global progress bar.
   pub progress: Progress,
   pub seeded_rng: Option<Mutex<StdRng>>,
@@ -109,7 +109,7 @@ impl ThreadSafeState {
     control: &[u8],
     zero_copy: Option<PinnedBuf>,
   ) -> CoreOp {
-    ops::dispatch_all(self, op_id, control, zero_copy, self.dispatch_selector)
+    ops::dispatch(self, op_id, control, zero_copy)
   }
 }
 
@@ -119,6 +119,7 @@ impl Loader for ThreadSafeState {
     specifier: &str,
     referrer: &str,
     is_main: bool,
+    is_dyn_import: bool,
   ) -> Result<ModuleSpecifier, ErrBox> {
     if !is_main {
       if let Some(import_map) = &self.import_map {
@@ -128,8 +129,14 @@ impl Loader for ThreadSafeState {
         }
       }
     }
+    let module_specifier =
+      ModuleSpecifier::resolve_import(specifier, referrer)?;
 
-    ModuleSpecifier::resolve_import(specifier, referrer).map_err(ErrBox::from)
+    if is_dyn_import {
+      self.check_dyn_import(&module_specifier)?;
+    }
+
+    Ok(module_specifier)
   }
 
   /// Given an absolute url, load its source code.
@@ -155,7 +162,6 @@ impl ThreadSafeState {
   pub fn new(
     flags: flags::DenoFlags,
     argv_rest: Vec<String>,
-    dispatch_selector: ops::OpSelector,
     progress: Progress,
     include_deno_namespace: bool,
   ) -> Result<Self, ErrBox> {
@@ -192,14 +198,7 @@ impl ThreadSafeState {
 
     let import_map: Option<ImportMap> = match &flags.import_map_path {
       None => None,
-      Some(file_name) => {
-        let base_url = match &main_module {
-          Some(module_specifier) => module_specifier.clone(),
-          None => unreachable!(),
-        };
-        let import_map = ImportMap::load(&base_url.to_string(), file_name)?;
-        Some(import_map)
-      }
+      Some(file_path) => Some(ImportMap::load(file_path)?),
     };
 
     let mut seeded_rng = None;
@@ -223,7 +222,6 @@ impl ThreadSafeState {
       workers: Mutex::new(UserWorkerTable::new()),
       start_time: Instant::now(),
       resource,
-      dispatch_selector,
       progress,
       seeded_rng,
       file_fetcher,
@@ -294,7 +292,7 @@ impl ThreadSafeState {
   }
 
   #[inline]
-  pub fn check_net_url(&self, url: url::Url) -> Result<(), ErrBox> {
+  pub fn check_net_url(&self, url: &url::Url) -> Result<(), ErrBox> {
     self.permissions.check_net_url(url)
   }
 
@@ -303,12 +301,35 @@ impl ThreadSafeState {
     self.permissions.check_run()
   }
 
+  pub fn check_dyn_import(
+    self: &Self,
+    module_specifier: &ModuleSpecifier,
+  ) -> Result<(), ErrBox> {
+    let u = module_specifier.as_url();
+    match u.scheme() {
+      "http" | "https" => {
+        self.check_net_url(u)?;
+        Ok(())
+      }
+      "file" => {
+        let filename = u
+          .to_file_path()
+          .unwrap()
+          .into_os_string()
+          .into_string()
+          .unwrap();
+        self.check_read(&filename)?;
+        Ok(())
+      }
+      _ => Err(permission_denied()),
+    }
+  }
+
   #[cfg(test)]
   pub fn mock(argv: Vec<String>) -> ThreadSafeState {
     ThreadSafeState::new(
       flags::DenoFlags::default(),
       argv,
-      ops::op_selector_std,
       Progress::new(),
       true,
     )
@@ -347,4 +368,17 @@ fn thread_safe() {
     String::from("./deno"),
     String::from("hello.js"),
   ]));
+}
+
+#[test]
+fn import_map_given_for_repl() {
+  let _result = ThreadSafeState::new(
+    flags::DenoFlags {
+      import_map_path: Some("import_map.json".to_string()),
+      ..flags::DenoFlags::default()
+    },
+    vec![String::from("./deno")],
+    Progress::new(),
+    true,
+  );
 }

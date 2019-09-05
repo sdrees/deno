@@ -6,6 +6,73 @@ https://github.com/denoland/deno/releases
 We also have one-line install commands at
 https://github.com/denoland/deno_install
 
+### v0.17.0 / 2019.09.04
+
+In deno:
+
+- feat: Add window.queueMicrotask (#2844)
+- feat: Support HTTP proxies in fetch (#2822)
+- feat: Support `_` and `_error` in REPL (#2845, #2843)
+- feat: add statusText for fetch (#2851)
+- feat: implement Addr interface (#2821)
+- fix: Improve error stacks for async ops (#2820)
+- fix: add console.dirxml (#2835)
+- fix: do not export `isConsoleInstance` (#2850)
+- fix: set/clearTimeout's params should not be bigint (#2834, #2838)
+- fix: shared queue requires aligned buffer (#2816)
+- refactor: Remove Node build dependency and change how internal V8 snapshots
+  are built  (#2825, #2827, #2826, #2826)
+- refactor: Remove flatbuffers (#2818, #2819, #2817, #2812, #2815, #2799)
+- regression: Introduce regression in fetch's Request/Response stream API to
+  support larger refactor (#2826)
+
+In deno_std:
+
+- fix: better paths handling in test runner (denoland/deno_std#574)
+- fix: avoid prototype builtin `hasOwnProperty` (denoland/deno_std#577)
+- fix: boolean regexp (denoland/deno_std#582)
+- fix: printf should use padEnd and padStart (denoland/deno_std#583)
+- fix: ws should use crypto getRandomValues (denoland/deno_std#584)
+
+### v0.16.0 / 2019.08.22
+
+In deno:
+
+- feat: "deno test" subcommand (#2783, #2784, #2800)
+- feat: implement console.trace() (#2780)
+- feat: support .d.ts files (#2746)
+- feat: support custom inspection of objects (#2791)
+- fix: dynamic import panic (#2792)
+- fix: handle tsconfig.json with comments (#2773)
+- fix: import map panics, use import map's location as its base URL (#2770)
+- fix: set response.url (#2782)
+
+In deno_std:
+
+- feat: add overloaded form of unit test declaration (denoland/deno_std#563)
+- feat: add printf implementation (fmt/sprintf.ts) (denoland/deno_std#566)
+- feat: print out the failed tests after the summary (denoland/deno_std#554)
+- feat: test runner (denoland/deno_std#516, denoland/deno_std#564,
+  denoland/deno_std#568)
+- fix: accept absolute root directories in the file server
+  (denoland/deno_std#558)
+- fix: refactor 'assertEquals' (denoland/deno_std#560)
+- fix: test all text functions in colors module (denoland/deno_std#553)
+- fix: move colors module into fmt module (denoland/deno_std#571)
+
+### v0.15.0 / 2019.08.13
+
+In deno:
+
+- feat: print cache location when no arg in deno info (#2752)
+- fix: Dynamic import should respect permissions (#2764)
+- fix: Propagate Url::to_file_path() errors instead of panicking (#2771)
+- fix: cache paths on Windows are broken (#2760)
+- fix: dynamic import base path problem for REPL and eval (#2757)
+- fix: permission requirements for Deno.rename() and Deno.link() (#2737)
+
+In deno_std: None
+
 ### v0.14.0 / 2019.08.09
 
 In deno:
@@ -45,7 +112,8 @@ In deno:
 In deno_std:
 
 - fix: Make shebangs Linux compatible (denoland/deno_std#545)
-- fix: Ignore error of writing responses to aborted requests (denoland/deno_std#546)
+- fix: Ignore error of writing responses to aborted requests
+  (denoland/deno_std#546)
 - fix: use Deno.execPath where possible (denoland/deno_std#548)
 
 ### v0.12.0 / 2019.07.16

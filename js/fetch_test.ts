@@ -18,6 +18,11 @@ test(async function fetchPerm(): Promise<void> {
   assertEquals(err.name, "PermissionDenied");
 });
 
+testPerm({ net: true }, async function fetchUrl(): Promise<void> {
+  const response = await fetch("http://localhost:4545/package.json");
+  assertEquals(response.url, "http://localhost:4545/package.json");
+});
+
 testPerm({ net: true }, async function fetchHeaders(): Promise<void> {
   const response = await fetch("http://localhost:4545/package.json");
   const headers = response.headers;
@@ -64,8 +69,8 @@ testPerm({ net: true }, async function fetchEmptyInvalid(): Promise<void> {
   } catch (err_) {
     err = err_;
   }
-  assertEquals(err.kind, Deno.ErrorKind.InvalidUri);
-  assertEquals(err.name, "InvalidUri");
+  assertEquals(err.kind, Deno.ErrorKind.RelativeUrlWithoutBase);
+  assertEquals(err.name, "RelativeUrlWithoutBase");
 });
 
 testPerm({ net: true }, async function fetchMultipartFormDataSuccess(): Promise<
@@ -102,6 +107,8 @@ testPerm(
 testPerm({ net: true }, async function fetchWithRedirection(): Promise<void> {
   const response = await fetch("http://localhost:4546/"); // will redirect to http://localhost:4545/
   assertEquals(response.status, 200);
+  assertEquals(response.statusText, "OK");
+  assertEquals(response.url, "http://localhost:4545/");
   const body = await response.text();
   assert(body.includes("<title>Directory listing for /</title>"));
 });
@@ -111,6 +118,7 @@ testPerm({ net: true }, async function fetchWithRelativeRedirection(): Promise<
 > {
   const response = await fetch("http://localhost:4545/tests"); // will redirect to /tests/
   assertEquals(response.status, 200);
+  assertEquals(response.statusText, "OK");
   const body = await response.text();
   assert(body.includes("<title>Directory listing for /tests/</title>"));
 });
