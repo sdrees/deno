@@ -6,6 +6,113 @@ https://github.com/denoland/deno/releases
 We also have one-line install commands at
 https://github.com/denoland/deno_install
 
+### v0.21.0 / 2019.10.19
+
+- feat: --reload flag to take arg for partial reload (#3109)
+- feat: Allow "deno eval" to run code as module (#3148)
+- feat: support --allow-net=:4500 (#3115)
+- fix: Ensure DENO_DIR when saving the REPL history (#3106)
+- fix: Update echo_server to new listen API (denoland/deno_std#625)
+- fix: [prettier] deno fmt should format jsx/tsx files (#3118)
+- fix: [tls] op_dial_tls is not registerd and broken (#3121)
+- fix: clearTimer bug (#3143)
+- fix: remote jsx/tsx files were compiled as js/ts (#3125)
+- perf: eager poll async ops in Isolate (#3046, #3128)
+- chore: Move std/fs/path to std/path (#3100)
+- upgrade: V8 to 7.9.304 (#3127)
+- upgrade: prettier type definition (#3101)
+- chore: Add debug build to github actions (#3127)
+- chore: merge deno_std into deno repo (#3091, #3096)
+
+### v0.20.0 / 2019.10.06
+
+In deno:
+
+- feat: Add Deno.hostname() (#3032)
+- feat: Add support for passing a key to Deno.env() (#2952)
+- feat: JSX Support (#3038)
+- feat: Replace Isolate::set_dispatch with Isolate::register_op (#3002, #3039,
+  #3041)
+- feat: window.onunload (#3023)
+- fix: Async compiler processing (#3043)
+- fix: Implement ignoreBOM option of UTF8Decoder in text_encoding (#3040)
+- fix: Support top-level-await in TypeScript (#3024)
+- fix: iterators on UrlSearchParams (#3044)
+- fix: listenDefaults/dialDefaults may be overriden in some cases (#3027)
+- upgrade: V8 to 7.9.218 (#3067)
+- upgrade: rust to 1.38.0 (#3030)
+- chore: Migrate CI to github actions (#3052, #3056, #3049, #3071, #3076, #3070,
+  #3066, #3061, #3010)
+- chore: Remove deno_cli_snapshots crate. Move //js to //cli/js (#3064)
+- chore: use xeval from deno_std (#3058)
+
+In deno_std:
+
+- feat: test runner v2 (denoland/deno_std#604)
+- feat: wss support with dialTLS (denoland/deno_std#615)
+- fix(ws): mask must not be set by default for server (denoland/deno_std#616)
+- fix: Implement expandGlob() and expandGlobSync() (denoland/deno_std#617)
+- upgrade: eslint and @typescript-eslint (denoland/deno_std#621)
+
+### v0.19.0 / 2019.09.24
+
+In deno:
+
+- feat: Add Deno.dialTLS()
+- feat: Make deno_cli installable via crates.io (#2946)
+- feat: Remove test.py, use cargo test as test frontend (#2967)
+- feat: dial/listen API change (#3000)
+- feat: parallelize downloads from TS compiler (#2949)
+- fix: Make `window` compatible with ts 3.6 (#2984)
+- fix: Remove some non-standard web API constructors (#2970)
+- fix: debug logging in runtime/compiler (#2953)
+- fix: flag parsing of config file (#2996)
+- fix: reschedule global timer if it fires earlier than expected (#2989)
+- fix: type directive parsing (#2954)
+- upgrade: V8 to 7.9.110 for top-level-await (#3015)
+- upgrade: to TypeScript 3.6.3 (#2969)
+
+In deno_std:
+
+- feat: Implement BufReader.readString (denoland/deno_std#607)
+- fix: TOML's key encoding (denoland/deno_std#612)
+- fix: remove //testing/main.ts (denoland/deno_std#605)
+- fix: types in example_client for ws module (denoland/deno_std#609)
+- upgrade: mime-db to commit c50e0d1 (denoland/deno_std#608)
+
+### v0.18.0 / 2019.09.13
+
+In deno:
+
+- build: remove tools/build.py; cargo build is the build frontend now (#2865,
+  #2874, #2876)
+- feat: Make integration tests rust unit tests (#2884)
+- feat: Set user agent for http client (#2916)
+- feat: add bindings to run microtasks from Isolate (#2793)
+- fix(fetch): implement bodyUsed (#2877)
+- fix(url): basing in constructor (#2867, #2921)
+- fix(xeval): incorrect chunk matching behavior (#2857)
+- fix: Default 'this' to window in EventTarget (#2918)
+- fix: Expose the DOM Body interface globally (#2903)
+- fix: Keep all deno_std URLs in sync (#2930)
+- fix: make 'deno fmt' faster (#2928)
+- fix: panic during block_on (#2905)
+- fix: panic during fetch (#2925)
+- fix: path normalization in resolve_from_cwd() (#2875)
+- fix: remove deprecated Deno.platform (#2895)
+- fix: replace bad rid panics with errors (#2870)
+- fix: type directives import (#2910)
+- upgrade: V8 7.9.8 (#2907)
+- upgrade: rust crates (#2937)
+
+In deno_std:
+
+- feat: Add xeval (denoland/deno_std#581)
+- fix(flags): Parse builtin properties (denoland/deno_std#579)
+- fix(uuid): Make it v4 rfc4122 compliant (denoland/deno_std#580)
+- perf: Improve prettier speed by adding d.ts files (denoland/deno_std#591)
+- upgrade: prettier to 1.18.2 (denoland/deno_std#592)
+
 ### v0.17.0 / 2019.09.04
 
 In deno:
@@ -21,7 +128,7 @@ In deno:
 - fix: set/clearTimeout's params should not be bigint (#2834, #2838)
 - fix: shared queue requires aligned buffer (#2816)
 - refactor: Remove Node build dependency and change how internal V8 snapshots
-  are built  (#2825, #2827, #2826, #2826)
+  are built (#2825, #2827, #2826, #2826)
 - refactor: Remove flatbuffers (#2818, #2819, #2817, #2812, #2815, #2799)
 - regression: Introduce regression in fetch's Request/Response stream API to
   support larger refactor (#2826)

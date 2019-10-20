@@ -1,7 +1,7 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use crate::fmt_errors::JSError;
+use crate::ops;
 use crate::state::ThreadSafeState;
-use crate::tokio_util;
 use deno;
 use deno::ErrBox;
 use deno::ModuleSpecifier;
@@ -32,10 +32,22 @@ impl Worker {
     {
       let mut i = isolate.lock().unwrap();
 
-      let state_ = state.clone();
-      i.set_dispatch(move |op_id, control_buf, zero_copy_buf| {
-        state_.dispatch(op_id, control_buf, zero_copy_buf)
-      });
+      ops::compiler::init(&mut i, &state);
+      ops::errors::init(&mut i, &state);
+      ops::fetch::init(&mut i, &state);
+      ops::files::init(&mut i, &state);
+      ops::fs::init(&mut i, &state);
+      ops::io::init(&mut i, &state);
+      ops::net::init(&mut i, &state);
+      ops::tls::init(&mut i, &state);
+      ops::os::init(&mut i, &state);
+      ops::permissions::init(&mut i, &state);
+      ops::process::init(&mut i, &state);
+      ops::random::init(&mut i, &state);
+      ops::repl::init(&mut i, &state);
+      ops::resources::init(&mut i, &state);
+      ops::timers::init(&mut i, &state);
+      ops::workers::init(&mut i, &state);
 
       let state_ = state.clone();
       i.set_dyn_import(move |id, specifier, referrer| {
@@ -79,15 +91,20 @@ impl Worker {
   pub fn execute_mod_async(
     &mut self,
     module_specifier: &ModuleSpecifier,
+    maybe_code: Option<String>,
     is_prefetch: bool,
   ) -> impl Future<Item = (), Error = ErrBox> {
     let worker = self.clone();
     let loader = self.state.clone();
     let isolate = self.isolate.clone();
     let modules = self.state.modules.clone();
-    let recursive_load =
-      RecursiveLoad::main(&module_specifier.to_string(), loader, modules)
-        .get_future(isolate);
+    let recursive_load = RecursiveLoad::main(
+      &module_specifier.to_string(),
+      maybe_code,
+      loader,
+      modules,
+    )
+    .get_future(isolate);
     recursive_load.and_then(move |id| -> Result<(), ErrBox> {
       worker.state.progress.done();
       if is_prefetch {
@@ -97,15 +114,6 @@ impl Worker {
         isolate.mod_evaluate(id)
       }
     })
-  }
-
-  /// Executes the provided JavaScript module.
-  pub fn execute_mod(
-    &mut self,
-    module_specifier: &ModuleSpecifier,
-    is_prefetch: bool,
-  ) -> Result<(), ErrBox> {
-    tokio_util::block_on(self.execute_mod_async(module_specifier, is_prefetch))
   }
 }
 
@@ -152,11 +160,14 @@ mod tests {
     tokio_util::run(lazy(move || {
       let mut worker =
         Worker::new("TEST".to_string(), StartupData::None, state);
-      let result = worker.execute_mod(&module_specifier, false);
-      if let Err(err) = result {
-        eprintln!("execute_mod err {:?}", err);
-      }
-      tokio_util::panic_on_error(worker)
+      worker
+        .execute_mod_async(&module_specifier, None, false)
+        .then(|result| {
+          if let Err(err) = result {
+            eprintln!("execute_mod err {:?}", err);
+          }
+          tokio_util::panic_on_error(worker)
+        })
     }));
 
     let metrics = &state_.metrics;
@@ -186,11 +197,14 @@ mod tests {
     tokio_util::run(lazy(move || {
       let mut worker =
         Worker::new("TEST".to_string(), StartupData::None, state);
-      let result = worker.execute_mod(&module_specifier, false);
-      if let Err(err) = result {
-        eprintln!("execute_mod err {:?}", err);
-      }
-      tokio_util::panic_on_error(worker)
+      worker
+        .execute_mod_async(&module_specifier, None, false)
+        .then(|result| {
+          if let Err(err) = result {
+            eprintln!("execute_mod err {:?}", err);
+          }
+          tokio_util::panic_on_error(worker)
+        })
     }));
 
     let metrics = &state_.metrics;
@@ -201,10 +215,12 @@ mod tests {
 
   #[test]
   fn execute_006_url_imports() {
+    let http_server_guard = crate::test_util::http_server();
+
     let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
       .parent()
       .unwrap()
-      .join("tests/006_url_imports.ts")
+      .join("cli/tests/006_url_imports.ts")
       .to_owned();
     let module_specifier =
       ModuleSpecifier::resolve_url_or_path(&p.to_string_lossy()).unwrap();
@@ -221,17 +237,21 @@ mod tests {
         state,
       );
       worker.execute("denoMain()").unwrap();
-      let result = worker.execute_mod(&module_specifier, false);
-      if let Err(err) = result {
-        eprintln!("execute_mod err {:?}", err);
-      }
-      tokio_util::panic_on_error(worker)
+      worker
+        .execute_mod_async(&module_specifier, None, false)
+        .then(|result| {
+          if let Err(err) = result {
+            eprintln!("execute_mod err {:?}", err);
+          }
+          tokio_util::panic_on_error(worker)
+        })
     }));
 
     let metrics = &state_.metrics;
     assert_eq!(metrics.resolve_count.load(Ordering::SeqCst), 3);
     // Check that we've only invoked the compiler once.
     assert_eq!(metrics.compiler_starts.load(Ordering::SeqCst), 1);
+    drop(http_server_guard);
   }
 
   fn create_test_worker() -> Worker {
@@ -248,7 +268,7 @@ mod tests {
 
   #[test]
   fn test_worker_messages() {
-    tokio_util::init(|| {
+    tokio_util::run_in_task(|| {
       let mut worker = create_test_worker();
       let source = r#"
         onmessage = function(e) {
@@ -299,7 +319,7 @@ mod tests {
 
   #[test]
   fn removed_from_resource_table_on_close() {
-    tokio_util::init(|| {
+    tokio_util::run_in_task(|| {
       let mut worker = create_test_worker();
       worker
         .execute("onmessage = () => { delete window.onmessage; }")
@@ -334,19 +354,21 @@ mod tests {
 
   #[test]
   fn execute_mod_resolve_error() {
-    tokio_util::init(|| {
+    tokio_util::run_in_task(|| {
       // "foo" is not a valid module specifier so this should return an error.
       let mut worker = create_test_worker();
       let module_specifier =
         ModuleSpecifier::resolve_url_or_path("does-not-exist").unwrap();
-      let result = worker.execute_mod_async(&module_specifier, false).wait();
+      let result = worker
+        .execute_mod_async(&module_specifier, None, false)
+        .wait();
       assert!(result.is_err());
     })
   }
 
   #[test]
   fn execute_mod_002_hello() {
-    tokio_util::init(|| {
+    tokio_util::run_in_task(|| {
       // This assumes cwd is project root (an assumption made throughout the
       // tests).
       let mut worker = create_test_worker();
@@ -357,7 +379,9 @@ mod tests {
         .to_owned();
       let module_specifier =
         ModuleSpecifier::resolve_url_or_path(&p.to_string_lossy()).unwrap();
-      let result = worker.execute_mod_async(&module_specifier, false).wait();
+      let result = worker
+        .execute_mod_async(&module_specifier, None, false)
+        .wait();
       assert!(result.is_ok());
     })
   }

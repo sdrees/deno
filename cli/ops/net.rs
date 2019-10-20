@@ -1,6 +1,6 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use super::dispatch_json::{Deserialize, JsonOp, Value};
-use crate::deno_error;
+use crate::ops::json_op;
 use crate::resolve_addr::resolve_addr;
 use crate::resources;
 use crate::resources::Resource;
@@ -15,12 +15,19 @@ use tokio;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
+pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
+  i.register_op("accept", s.core_op(json_op(s.stateful_op(op_accept))));
+  i.register_op("dial", s.core_op(json_op(s.stateful_op(op_dial))));
+  i.register_op("shutdown", s.core_op(json_op(s.stateful_op(op_shutdown))));
+  i.register_op("listen", s.core_op(json_op(s.stateful_op(op_listen))));
+}
+
 #[derive(Deserialize)]
 struct AcceptArgs {
   rid: i32,
 }
 
-pub fn op_accept(
+fn op_accept(
   _state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -28,45 +35,44 @@ pub fn op_accept(
   let args: AcceptArgs = serde_json::from_value(args)?;
   let server_rid = args.rid as u32;
 
-  match resources::lookup(server_rid) {
-    None => Err(deno_error::bad_resource()),
-    Some(server_resource) => {
-      let op = tokio_util::accept(server_resource)
-        .and_then(move |(tcp_stream, _socket_addr)| {
-          let local_addr = tcp_stream.local_addr()?;
-          let remote_addr = tcp_stream.peer_addr()?;
-          let tcp_stream_resource = resources::add_tcp_stream(tcp_stream);
-          Ok((tcp_stream_resource, local_addr, remote_addr))
-        })
-        .map_err(ErrBox::from)
-        .and_then(move |(tcp_stream_resource, local_addr, remote_addr)| {
-          futures::future::ok(json!({
-            "rid": tcp_stream_resource.rid,
-            "localAddr": local_addr.to_string(),
-            "remoteAddr": remote_addr.to_string(),
-          }))
-        });
+  let server_resource = resources::lookup(server_rid)?;
+  let op = tokio_util::accept(server_resource)
+    .and_then(move |(tcp_stream, _socket_addr)| {
+      let local_addr = tcp_stream.local_addr()?;
+      let remote_addr = tcp_stream.peer_addr()?;
+      let tcp_stream_resource = resources::add_tcp_stream(tcp_stream);
+      Ok((tcp_stream_resource, local_addr, remote_addr))
+    })
+    .map_err(ErrBox::from)
+    .and_then(move |(tcp_stream_resource, local_addr, remote_addr)| {
+      futures::future::ok(json!({
+        "rid": tcp_stream_resource.rid,
+        "localAddr": local_addr.to_string(),
+        "remoteAddr": remote_addr.to_string(),
+      }))
+    });
 
-      Ok(JsonOp::Async(Box::new(op)))
-    }
-  }
+  Ok(JsonOp::Async(Box::new(op)))
 }
 
 #[derive(Deserialize)]
 struct DialArgs {
-  network: String,
-  address: String,
+  transport: String,
+  hostname: String,
+  port: u16,
 }
 
-pub fn op_dial(
+fn op_dial(
   state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: DialArgs = serde_json::from_value(args)?;
-  let network = args.network;
-  assert_eq!(network, "tcp"); // TODO Support others.
-  let address = args.address;
+  assert_eq!(args.transport, "tcp"); // TODO Support others.
+
+  // TODO(ry) Using format! is suboptimal here. Better would be if
+  // state.check_net and resolve_addr() took hostname and port directly.
+  let address = format!("{}:{}", args.hostname, args.port);
 
   state.check_net(&address)?;
 
@@ -98,47 +104,46 @@ struct ShutdownArgs {
   how: i32,
 }
 
-pub fn op_shutdown(
+fn op_shutdown(
   _state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: ShutdownArgs = serde_json::from_value(args)?;
 
-  let rid = args.rid;
+  let rid = args.rid as u32;
   let how = args.how;
-  match resources::lookup(rid as u32) {
-    None => Err(deno_error::bad_resource()),
-    Some(mut resource) => {
-      let shutdown_mode = match how {
-        0 => Shutdown::Read,
-        1 => Shutdown::Write,
-        _ => unimplemented!(),
-      };
+  let mut resource = resources::lookup(rid)?;
 
-      // Use UFCS for disambiguation
-      Resource::shutdown(&mut resource, shutdown_mode)?;
-      Ok(JsonOp::Sync(json!({})))
-    }
-  }
+  let shutdown_mode = match how {
+    0 => Shutdown::Read,
+    1 => Shutdown::Write,
+    _ => unimplemented!(),
+  };
+
+  // Use UFCS for disambiguation
+  Resource::shutdown(&mut resource, shutdown_mode)?;
+  Ok(JsonOp::Sync(json!({})))
 }
 
 #[derive(Deserialize)]
 struct ListenArgs {
-  network: String,
-  address: String,
+  transport: String,
+  hostname: String,
+  port: u16,
 }
 
-pub fn op_listen(
+fn op_listen(
   state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: ListenArgs = serde_json::from_value(args)?;
+  assert_eq!(args.transport, "tcp");
 
-  let network = args.network;
-  assert_eq!(network, "tcp");
-  let address = args.address;
+  // TODO(ry) Using format! is suboptimal here. Better would be if
+  // state.check_net and resolve_addr() took hostname and port directly.
+  let address = format!("{}:{}", args.hostname, args.port);
 
   state.check_net(&address)?;
 

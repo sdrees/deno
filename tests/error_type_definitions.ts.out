@@ -1,4 +1,0 @@
-[WILDCARD]error: Uncaught TypeError: Automatic type resolution not supported
-[WILDCARD]compiler.ts:[WILDCARD]
-    at fileExists ([WILDCARD]compiler.ts:[WILDCARD])
-[WILDCARD]

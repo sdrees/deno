@@ -21,7 +21,7 @@ interface EvalErrorInfo {
 }
 
 declare interface DenoCore {
-  print(s: string, is_err?: boolean);
+  print(s: string, isErr?: boolean);
   dispatch(
     opId: number,
     control: Uint8Array,
@@ -37,6 +37,8 @@ declare interface DenoCore {
     shift(): Uint8Array | null;
   };
 
+  ops(): Record<string, number>;
+
   recv(cb: MessageCallback): void;
 
   send(
@@ -44,8 +46,6 @@ declare interface DenoCore {
     control: null | ArrayBufferView,
     data?: ArrayBufferView
   ): null | Uint8Array;
-
-  print(x: string, isErr?: boolean): void;
 
   shared: SharedArrayBuffer;
 
@@ -63,4 +63,4 @@ declare interface DenoCore {
 declare interface DenoInterface {
   core: DenoCore;
 }
-declare var Deno: DenoInterface;
+declare let Deno: DenoInterface;

@@ -1,46 +1,53 @@
 # Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
-# Dummy package info required by `cargo fetch`.
-# Use tools/sync_rust_crates.py to install deps after editing this file.
-# Deno does not build with cargo. Deno uses a build system called gn.
-# See build_extra/rust/BUILD.gn for the manually built configuration of rust
-# crates.
 
+[package]
+name = "deno_cli"
+version = "0.21.0"
+license = "MIT"
+authors = ["the Deno authors"]
+edition = "2018"
+description = "Provides the deno executable"
+repository = "https://github.com/denoland/deno"
+default-run = "deno"
+
+[lib]
+name = "deno_cli"
+path = "lib.rs"
 
 [[bin]]
 name = "deno"
 path = "main.rs"
 
-[package]
-name = "deno_cli"
-version = "0.17.0"
-edition = "2018"
+[build-dependencies]
+deno_typescript = { path = "../deno_typescript", version = "0.21.0" }
 
 [dependencies]
-deno = { path = "../core" }
+deno = { path = "../core", version = "0.21.0" }
+deno_typescript = { path = "../deno_typescript", version = "0.21.0" }
 
-ansi_term = "0.12.0"
+ansi_term = "0.12.1"
 atty = "0.2.13"
 clap = "2.33.0"
 dirs = "2.0.2"
-futures = "0.1.28"
+futures = "0.1.29"
 http = "0.1.18"
-hyper = "0.12.33"
+hyper = "0.12.34"
 hyper-rustls = "0.17.1"
-indexmap = "1.1.0"
-integer-atomics = "1.0.2"
-lazy_static = "1.3.0"
+indexmap = "1.2.0"
+lazy_static = "1.4.0"
 libc = "0.2.62"
 log = "0.4.8"
-rand = "0.6.5"
-regex = "1.2.1"
+rand = "0.7.0"
+regex = "1.3.1"
 remove_dir_all = "0.5.2"
 reqwest = { version = "0.9.20", default-features = false, features = ["rustls-tls"] }
-ring = "0.16.8"
+ring = "0.16.9"
 rustyline = "5.0.2"
-serde = { version = "1.0.99", features = ["derive"] }
-serde_derive = "1.0.99"
+serde = { version = "1.0.100", features = ["derive"] }
+serde_derive = "1.0.100"
 serde_json = { version = "1.0.40", features = [ "preserve_order" ] }
 source-map-mappings = "0.5.0"
+sys-info = "0.5.8"
 tempfile = "3.1.0"
 termcolor = "1.0.5"
 tokio = "0.1.22"
@@ -52,12 +59,15 @@ tokio-rustls = "0.10.0"
 tokio-threadpool = "0.1.15"
 url = "1.7.2"
 utime = "0.2.1"
-deno_cli_snapshots = { path = "../cli_snapshots" }
-deno_typescript = { path = "../deno_typescript" }
+webpki = "0.21.0"
+webpki-roots = "0.17.0"
 
 [target.'cfg(windows)'.dependencies]
-winapi = "0.3.7"
+winapi = "0.3.8"
 fwdansi = "1.0.1"
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.14.1"
+
+[dev-dependencies]
+os_pipe = "0.8.2"

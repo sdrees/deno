@@ -26,8 +26,9 @@ standard browser-compatible protocol for loading modules: URLs.
 Deno provides security guarantees about how programs can access your system with
 the default being the most restrictive secure sandbox.
 
-Deno provides <a href="https://github.com/denoland/deno_std">a set of reviewed
-(audited) standard modules</a> that are guaranteed to work with Deno.
+Deno provides <a href="https://github.com/denoland/deno/tree/master/std">a set
+of reviewed (audited) standard modules</a> that are guaranteed to work with
+Deno.
 
 ### Goals
 
@@ -71,7 +72,6 @@ Deno provides <a href="https://github.com/denoland/deno_std">a set of reviewed
     - bundling (`deno bundle`)
     - runtime type info (`deno types`)
     - test runner (`deno test`)
-      [not yet](https://github.com/denoland/deno_std/issues/193)
     - command-line debugger (`--debug`)
       [not yet](https://github.com/denoland/deno/issues/1120)
     - linter (`deno lint`) [not yet](https://github.com/denoland/deno/issues/1880)
@@ -120,7 +120,14 @@ Using [Homebrew](https://brew.sh/) (mac):
 brew install deno
 ```
 
-Deno can also be installed manually, by downloading a tarball or zip file at
+To install from source:
+
+```shell
+cargo install deno_cli
+```
+
+Deno binaries can also be installed manually, by downloading a tarball or zip
+file at
 [github.com/denoland/deno/releases](https://github.com/denoland/deno/releases).
 These packages contain just a single executable file. You will have to set the
 executable bit on Mac and Linux.
@@ -153,21 +160,14 @@ git clone --recurse-submodules https://github.com/denoland/deno.git
 Now we can start the build:
 
 ```bash
-cd deno
-./tools/setup.py
-
-# You may need to ensure that sccache is running.
-# (TODO it's unclear if this is necessary or not.)
-# prebuilt/mac/sccache --start-server
-
 # Build.
-./tools/build.py
+cargo build -vv
 
 # Run.
 ./target/debug/deno tests/002_hello.ts
 
 # Test.
-./tools/test.py
+cargo test
 
 # Format code.
 ./tools/format.py
@@ -175,7 +175,7 @@ cd deno
 
 #### Prerequisites
 
-To ensure reproducible builds, deno has most of its dependencies in a git
+To ensure reproducible builds, Deno has most of its dependencies in a git
 submodule. However, you need to install separately:
 
 1. [Rust](https://www.rust-lang.org/en-US/install.html) >= 1.36.0
@@ -187,54 +187,58 @@ Extra steps for Mac users: install [XCode](https://developer.apple.com/xcode/)
 
 Extra steps for Windows users:
 
+<!-- prettier-ignore-start -->
+<!-- see https://github.com/prettier/prettier/issues/3679 -->
+
 1. Add `python.exe` to `PATH` (e.g. `set PATH=%PATH%;C:\Python27\python.exe`)
 2. Get [VS Community 2017](https://www.visualstudio.com/downloads/) with
    "Desktop development with C++" toolkit and make sure to select the following
    required tools listed below along with all C++ tools.
-   - Windows 10 SDK >= 10.0.17134
-   - Visual C++ ATL for x86 and x64
-   - Visual C++ MFC for x86 and x64
-   - C++ profiling tools
+    - Windows 10 SDK >= 10.0.17134
+    - Visual C++ ATL for x86 and x64
+    - Visual C++ MFC for x86 and x64
+    - C++ profiling tools
 3. Enable "Debugging Tools for Windows". Go to "Control Panel" → "Programs" →
    "Programs and Features" → Select "Windows Software Development Kit - Windows
    10" → "Change" → "Change" → Check "Debugging Tools For Windows" → "Change" ->
    "Finish".
 4. Make sure you are using git version 2.19.2.windows.1 or newer.
 
+<!-- prettier-ignore-end -->
+
 #### Other useful commands
 
 ```bash
 # Call ninja manually.
-./third_party/depot_tools/ninja -C target/debug
+ninja -C target/debug
 
 # Build a release binary.
-./tools/build.py --release deno
+cargo build --release
 
 # List executable targets.
-./third_party/depot_tools/gn ls target/debug //:* --as=output --type=executable
+gn --root=core/libdeno ls target/debug "//:*" --as=output --type=executable
 
 # List build configuration.
-./third_party/depot_tools/gn args target/debug/ --list
+gn --root=core/libdeno args target/debug/ --list
 
 # Edit build configuration.
-./third_party/depot_tools/gn args target/debug/
+gn --root=core/libdeno args target/debug/
 
 # Describe a target.
-./third_party/depot_tools/gn desc target/debug/ :deno
-./third_party/depot_tools/gn help
+gn --root=core/libdeno desc target/debug/ :deno
+gn help
 
 # Update third_party modules
 git submodule update
 
 # Skip downloading binary build tools and point the build
 # to the system provided ones (for packagers of deno ...).
-./tools/setup.py --no-binary-download
 export DENO_BUILD_ARGS="clang_base_path=/usr clang_use_chrome_plugins=false"
-DENO_GN_PATH=/usr/bin/gn DENO_NINJA_PATH=/usr/bin/ninja ./tools/build.py
+DENO_NO_BINARY_DOWNLOAD=1 DENO_GN_PATH=/usr/bin/gn cargo build
 ```
 
 Environment variables: `DENO_BUILD_MODE`, `DENO_BUILD_PATH`, `DENO_BUILD_ARGS`,
-`DENO_DIR`, `DENO_GN_PATH`, `DENO_NINJA_PATH`.
+`DENO_DIR`, `DENO_GN_PATH`, `DENO_NO_BINARY_DOWNLOAD`.
 
 ## API reference
 
@@ -266,14 +270,12 @@ In this program each command-line argument is assumed to be a filename, the file
 is opened, and printed to stdout.
 
 ```ts
-(async () => {
-  for (let i = 1; i < Deno.args.length; i++) {
-    let filename = Deno.args[i];
-    let file = await Deno.open(filename);
-    await Deno.copy(Deno.stdout, file);
-    file.close();
-  }
-})();
+for (let i = 1; i < Deno.args.length; i++) {
+  let filename = Deno.args[i];
+  let file = await Deno.open(filename);
+  await Deno.copy(Deno.stdout, file);
+  file.close();
+}
 ```
 
 The `copy()` function here actually makes no more than the necessary kernel ->
@@ -293,17 +295,12 @@ This is an example of a simple server which accepts connections on port 8080,
 and returns to the client anything it sends.
 
 ```ts
-const { listen, copy } = Deno;
-
-(async () => {
-  const addr = "0.0.0.0:8080";
-  const listener = listen("tcp", addr);
-  console.log("listening on", addr);
-  while (true) {
-    const conn = await listener.accept();
-    copy(conn, conn);
-  }
-})();
+const listener = Deno.listen({ port: 8080 });
+console.log("listening on 0.0.0.0:8080");
+while (true) {
+  const conn = await listener.accept();
+  Deno.copy(conn, conn);
+}
 ```
 
 When this program is started, the user is prompted for permission to listen on
@@ -314,7 +311,7 @@ $ deno https://deno.land/std/examples/echo_server.ts
 ⚠️  Deno requests network access to "listen". Grant? [a/y/n/d (a = allow always, y = allow once, n = deny once, d = deny always)]
 ```
 
-For security reasons, deno does not allow programs to access the network without
+For security reasons, Deno does not allow programs to access the network without
 explicit permission. To avoid the console prompt, use a command-line flag:
 
 ```shell
@@ -342,25 +339,23 @@ presented to the user.
 ```ts
 const { permissions, revokePermission, open, remove } = Deno;
 
-(async () => {
-  // lookup a permission
-  if (!permissions().write) {
-    throw new Error("need write permission");
-  }
+// lookup a permission
+if (!permissions().write) {
+  throw new Error("need write permission");
+}
 
-  const log = await open("request.log", "a+");
+const log = await open("request.log", "a+");
 
-  // revoke some permissions
-  revokePermission("read");
-  revokePermission("write");
+// revoke some permissions
+revokePermission("read");
+revokePermission("write");
 
-  // use the log file
-  const encoder = new TextEncoder();
-  await log.write(encoder.encode("hello\n"));
+// use the log file
+const encoder = new TextEncoder();
+await log.write(encoder.encode("hello\n"));
 
-  // this will prompt for the write permission or fail.
-  await remove("request.log");
-})();
+// this will prompt for the write permission or fail.
+await remove("request.log");
 ```
 
 ### File server
@@ -386,9 +381,27 @@ And if you ever want to upgrade to the latest published version:
 $ file_server --reload
 ```
 
+### Reload specific modules
+
+Sometimes we want to upgrade only some modules. You can control it by passing an
+argument to a `--reload` flag.
+
+To reload everything
+
+`--reload`
+
+To reload all standard modules
+
+`--reload=https://deno.land/std`
+
+To reload specific modules (in this example - colors and file system utils) use
+a comma to separate URLs
+
+`--reload=https://deno.land/std/fs/utils.ts,https://deno.land/std/fmt/colors.ts`
+
 ### Permissions whitelist
 
-deno also provides permissions whitelist.
+Deno also provides permissions whitelist.
 
 This is an example to restrict File system access by whitelist.
 
@@ -408,9 +421,7 @@ $ deno --allow-read=/etc https://deno.land/std/examples/cat.ts /etc/passwd
 This is an example to restrict host.
 
 ```ts
-(async () => {
-  const result = await fetch("https://deno.land/std/examples/echo_server.ts");
-})();
+const result = await fetch("https://deno.land/std/examples/echo_server.ts");
 ```
 
 ```shell
@@ -424,15 +435,13 @@ $ deno --allow-net=deno.land allow-net-whitelist-example.ts
 Example:
 
 ```ts
-window.onload = async function() {
-  // create subprocess
-  const p = Deno.run({
-    args: ["echo", "hello"]
-  });
+// create subprocess
+const p = Deno.run({
+  args: ["echo", "hello"]
+});
 
-  // await its completion
-  await p.status();
-};
+// await its completion
+await p.status();
 ```
 
 Run it:
@@ -452,36 +461,32 @@ By default when you use `Deno.run()` subprocess inherits `stdin`, `stdout` and
 you can use `"piped"` option.
 
 ```ts
-window.onload = async function() {
-  const decoder = new TextDecoder();
+const fileNames = Deno.args.slice(1);
 
-  const fileNames = Deno.args.slice(1);
+const p = Deno.run({
+  args: [
+    "deno",
+    "run",
+    "--allow-read",
+    "https://deno.land/std/examples/cat.ts",
+    ...fileNames
+  ],
+  stdout: "piped",
+  stderr: "piped"
+});
 
-  const p = Deno.run({
-    args: [
-      "deno",
-      "run",
-      "--allow-read",
-      "https://deno.land/std/examples/cat.ts",
-      ...fileNames
-    ],
-    stdout: "piped",
-    stderr: "piped"
-  });
+const { code } = await p.status();
 
-  const { code } = await p.status();
+if (code === 0) {
+  const rawOutput = await p.output();
+  await Deno.stdout.write(rawOutput);
+} else {
+  const rawError = await p.stderrOutput();
+  const errorString = new TextDecoder().decode(rawError);
+  console.log(errorString);
+}
 
-  if (code === 0) {
-    const rawOutput = await p.output();
-    await Deno.stdout.write(rawOutput);
-  } else {
-    const rawError = await p.stderrOutput();
-    const errorString = decoder.decode(rawError);
-    console.log(errorString);
-  }
-
-  Deno.exit(code);
-};
+Deno.exit(code);
 ```
 
 When you run it:
@@ -566,14 +571,14 @@ external libraries in a central `deps.ts` file (which serves the same purpose as
 Node's `package.json` file). For example, let's say you were using the above
 testing library across a large project. Rather than importing
 `"https://deno.land/std/testing/mod.ts"` everywhere, you could create a
-`deps.ts` file the exports the third-party code:
+`deps.ts` file that exports the third-party code:
 
 ```ts
 export { test, assertEquals } from "https://deno.land/std/testing/mod.ts";
 ```
 
-And throughout project one can import from the `deps.ts` and avoid having many
-references to the same URL:
+And throughout the same project, you can import from the `deps.ts` and avoid
+having many references to the same URL:
 
 ```ts
 import { test, assertEquals } from "./deps.ts";
@@ -646,7 +651,7 @@ deno
 A secure runtime for JavaScript and TypeScript built with V8, Rust, and Tokio.
 
 Docs: https://deno.land/manual.html
-Modules: https://github.com/denoland/deno_std
+Modules: https://deno.land/x/
 Bugs: https://github.com/denoland/deno/issues
 
 To run the REPL:
@@ -683,7 +688,7 @@ OPTIONS:
     -L, --log-level <log-level>        Set log level [possible values: debug, info]
         --no-fetch                     Do not download remote modules
         --no-prompt                    Do not use prompts
-    -r, --reload                       Reload source code cache (recompile TypeScript)
+    -r, --reload=<CACHE_BLACKLIST>     Reload source code cache (recompile TypeScript)
         --seed <NUMBER>                Seed Math.random()
         --v8-flags=<v8-flags>          Set V8 command line options
         --v8-options                   Print V8 command line options
@@ -708,6 +713,8 @@ SUBCOMMANDS:
 ENVIRONMENT VARIABLES:
     DENO_DIR        Set deno's base directory
     NO_COLOR        Set to disable color
+    HTTP_PROXY      Set proxy address for HTTP requests (module downloads, fetch)
+    HTTPS_PROXY     Set proxy address for HTTPS requests (module downloads, fetch)
 ```
 
 ### Environmental variables
@@ -872,12 +879,12 @@ $ deno install awesome_cli https://example.com/awesome/cli.ts
 
 ## Proxies
 
-Deno supports proxies.
+Deno supports proxies for module downloads and `fetch` API.
 
-`HTTP_PROXY` and `HTTPS_PROXY` environmental variables are used to configure
-them.
+Proxy configuration is read from environmental variables: `HTTP_PROXY` and
+`HTTPS_PROXY`.
 
-For Windows if environmental variables are not found Deno will fall back to
+In case of Windows if environmental variables are not found Deno falls back to
 reading proxies from registry.
 
 ## Import maps
@@ -922,6 +929,76 @@ window.onload = async function() {
 $ deno run --importmap=import_map.json hello_server.ts
 ```
 
+## Program lifecycle
+
+Deno supports browser compatible lifecycle events: `load` and `unload`. You can
+use these event to provide setup and cleanup code in your program.
+
+`load` event listener supports asynchronous functions and will await these
+functions. `unload` event listener supports only synchronous code. Both events
+are not cancellable.
+
+Example:
+
+```typescript
+// main.ts
+import "./imported.ts";
+
+const handler = (e: Event): void => {
+  console.log(`got ${e.type} event in event handler (main)`);
+};
+
+window.addEventListener("load", handler);
+
+window.addEventListener("unload", handler);
+
+window.onload = (e: Event): void => {
+  console.log(`got ${e.type} event in onload function (main)`);
+};
+
+window.onunload = (e: Event): void => {
+  console.log(`got ${e.type} event in onunload function (main)`);
+};
+
+// imported.ts
+const handler = (e: Event): void => {
+  console.log(`got ${e.type} event in event handler (imported)`);
+};
+
+window.addEventListener("load", handler);
+window.addEventListener("unload", handler);
+
+window.onload = (e: Event): void => {
+  console.log(`got ${e.type} event in onload function (imported)`);
+};
+
+window.onunload = (e: Event): void => {
+  console.log(`got ${e.type} event in onunload function (imported)`);
+};
+
+console.log("log from imported script");
+```
+
+Note that you can use both `window.addEventListener` and
+`window.onload`/`window.onunload` to define handlers for events. There is a
+major difference between them, let's run example:
+
+```shell
+$ deno main.ts
+log from imported script
+log from main script
+got load event in onload function (main)
+got load event in event handler (imported)
+got load event in event handler (main)
+got unload event in onunload function (main)
+got unload event in event handler (imported)
+got unload event in event handler (main)
+```
+
+All listeners added using `window.addEventListener` were run, but
+`window.onload` and `window.onunload` defined in `main.ts` overridden handlers
+defined in `imported.ts`.
+
 ## Internal details
 
 ### Deno and Linux analogy
@@ -932,7 +1009,7 @@ $ deno run --importmap=import_map.json hello_server.ts
 |                        Syscalls | Ops                              |
 |           File descriptors (fd) | [Resource ids (rid)](#resources) |
 |                       Scheduler | Tokio                            |
-| Userland: libc++ / glib / boost | deno_std                         |
+| Userland: libc++ / glib / boost | https://deno.land/std/           |
 |                 /proc/\$\$/stat | [Deno.metrics()](#metrics)       |
 |                       man pages | deno types                       |
 
@@ -954,7 +1031,7 @@ close(3);
 
 #### Metrics
 
-Metrics is deno's internal counters for various statics.
+Metrics is Deno's internal counters for various statics.
 
 ```shell
 > console.table(Deno.metrics())
@@ -980,7 +1057,7 @@ To start profiling,
 ```sh
 # Make sure we're only building release.
 # Build deno and V8's d8.
-./tools/build.py --release d8 deno
+ninja -C target/release d8
 
 # Start the program we want to benchmark with --prof
 ./target/release/deno tests/http_bench.ts --allow-net --v8-flags=--prof &
@@ -1030,7 +1107,7 @@ To learn more about `d8` and profiling, check out the following links:
 
 ### Debugging with LLDB
 
-We can use LLDB to debug deno.
+We can use LLDB to debug Deno.
 
 ```shell
 $ lldb -- target/debug/deno run tests/worker.js
@@ -1144,7 +1221,7 @@ Before submitting, please make sure the following is done:
 
 1. That there is a related issue and it is referenced in the PR text.
 2. There are tests that cover the changes.
-3. Ensure `./tools/test.py` passes.
+3. Ensure `cargo test` passes.
 4. Format your code with `tools/format.py`
 5. Make sure `./tools/lint.py` passes.
 

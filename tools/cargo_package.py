@@ -15,8 +15,7 @@ import errno
 from shutil import copytree, ignore_patterns, copyfile
 from tempfile import mkdtemp
 from string import Template
-from util import root_path
-from util import run
+from util import root_path, run
 
 if sys.platform == "linux2":
     llvm_target = "x86_64-unknown-linux-gnu"
@@ -30,7 +29,7 @@ elif sys.platform == "win32":
 else:
     assert (False)
 
-lib_name = os.path.join(root_path, "target/release/obj/core/libdeno",
+lib_name = os.path.join(root_path, "target", "release", "obj",
                         "libdeno" + static_lib_suffix)
 
 
@@ -49,7 +48,10 @@ version = get_version(cargo_toml_path)
 def main():
     os.chdir(root_path)
 
-    run(["tools/build.py", "libdeno_static_lib", "--release"])
+    run([
+        "cargo", "build", "-vv", "--manifest-path", cargo_toml_path, "--lib",
+        "--release", "--locked"
+    ])
     assert (os.path.exists(lib_name))
 
     root_temp = mkdtemp()

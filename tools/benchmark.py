@@ -10,15 +10,13 @@ import os
 import sys
 import json
 import time
-import shutil
-from util import find_exts, root_path, run, run_output
-from util import build_path, executable_suffix
 import tempfile
-import http_server
-import throughput_benchmark
-from http_benchmark import http_benchmark
-import prebuilt
 import subprocess
+from util import build_path, executable_suffix, root_path, run, run_output
+import third_party
+from http_benchmark import http_benchmark
+import throughput_benchmark
+import http_server
 
 # The list of the tuples of the benchmark name and arguments
 exec_time_benchmarks = [
@@ -31,10 +29,6 @@ exec_time_benchmarks = [
     ("workers_round_robin", ["tests/workers_round_robin_bench.ts"]),
 ]
 
-gh_pages_data_file = "gh-pages/data.json"
-all_data_file = "website/data.json"  # Includes all benchmark data.
-recent_data_file = "website/recent.json"  # Includes recent 20 benchmark data.
-
 
 def read_json(filename):
     with open(filename) as json_file:
@@ -46,44 +40,32 @@ def write_json(filename, data):
         json.dump(data, outfile)
 
 
-def import_data_from_gh_pages():
-    if os.path.exists(all_data_file):
-        return
-    try:
-        run([
-            "git", "clone", "--depth", "1", "-b", "gh-pages",
-            "https://github.com/denoland/deno.git", "gh-pages"
-        ])
-        shutil.copy(gh_pages_data_file, all_data_file)
-    except ValueError:
-        write_json(all_data_file, [])  # writes empty json data
-
-
 def get_binary_sizes(build_dir):
-    # Because cargo's OUT_DIR is not predictable, we have to search the build
-    # tree for these files...
-    files = find_exts([build_dir], ["js", "map", "bin"])
-    path_dict = {
-        "deno": os.path.join(build_dir, "deno" + executable_suffix),
-    }
-    for f in files:
-        if f.endswith("CLI_SNAPSHOT.js"):
-            path_dict["CLI_SNAPSHOT.js"] = f
-        elif f.endswith("CLI_SNAPSHOT.js.map"):
-            path_dict["CLI_SNAPSHOT.js.map"] = f
-        elif f.endswith("CLI_SNAPSHOT.bin"):
-            path_dict["CLI_SNAPSHOT.bin"] = f
-        elif f.endswith("COMPILER_SNAPSHOT.js"):
-            path_dict["COMPILER_SNAPSHOT.js"] = f
-        elif f.endswith("COMPILER_SNAPSHOT.js.map"):
-            path_dict["COMPILER_SNAPSHOT.js.map"] = f
-        elif f.endswith("COMPILER_SNAPSHOT.bin"):
-            path_dict["COMPILER_SNAPSHOT.bin"] = f
-
     sizes = {}
-    for name, path in path_dict.items():
-        assert os.path.exists(path)
-        sizes[name] = os.path.getsize(path)
+    mtimes = {}
+    # The deno executable should be located at the root of the build tree.
+    deno_exe = os.path.join(build_dir, "deno" + executable_suffix)
+    sizes["deno"] = os.path.getsize(deno_exe)
+    # Because cargo's OUT_DIR is not predictable, search the build tree for
+    # snapshot related files.
+    for parent_dir, _, file_names in os.walk(build_dir):
+        for file_name in file_names:
+            if not file_name in [
+                    "CLI_SNAPSHOT.bin",
+                    "CLI_SNAPSHOT.js",
+                    "CLI_SNAPSHOT.js.map",
+                    "COMPILER_SNAPSHOT.bin",
+                    "COMPILER_SNAPSHOT.js",
+                    "COMPILER_SNAPSHOT.js.map",
+            ]:
+                continue
+            file_path = os.path.join(parent_dir, file_name)
+            file_mtime = os.path.getmtime(file_path)
+            # If multiple copies of a file are found, use the most recent one.
+            if file_name in mtimes and mtimes[file_name] > file_mtime:
+                continue
+            mtimes[file_name] = file_mtime
+            sizes[file_name] = os.path.getsize(file_path)
     return sizes
 
 
@@ -178,10 +160,11 @@ def run_max_mem_benchmark(deno_exe):
 
 
 def run_exec_time(deno_exe, build_dir):
+    third_party.download_hyperfine()
+    hyperfine_exe = third_party.get_prebuilt_tool_path("hyperfine")
     benchmark_file = os.path.join(build_dir, "hyperfine_results.json")
-    hyperfine = prebuilt.load_hyperfine()
     run([
-        hyperfine, "--ignore-failure", "--export-json", benchmark_file,
+        hyperfine_exe, "--ignore-failure", "--export-json", benchmark_file,
         "--warmup", "3"
     ] + [
         deno_exe + " run " + " ".join(args)
@@ -210,8 +193,8 @@ def run_http(build_dir, new_data):
 
 def bundle_benchmark(deno_exe):
     bundles = {
-        "file_server": "https://deno.land/std/http/file_server.ts",
-        "gist": "https://deno.land/std/examples/gist.ts",
+        "file_server": "./std/http/file_server.ts",
+        "gist": "./std/examples/gist.ts",
     }
 
     sizes = {}
@@ -245,7 +228,6 @@ def main(argv):
     deno_exe = os.path.join(build_dir, "deno")
 
     os.chdir(root_path)
-    import_data_from_gh_pages()
 
     new_data = {
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -274,11 +256,7 @@ def main(argv):
     print json.dumps(new_data, indent=2)
     print "===== </BENCHMARK RESULTS>"
 
-    all_data = read_json(all_data_file)
-    all_data.append(new_data)
-
-    write_json(all_data_file, all_data)
-    write_json(recent_data_file, all_data[-20:])
+    write_json(os.path.join(build_dir, "bench.json"), new_data)
 
 
 if __name__ == '__main__':

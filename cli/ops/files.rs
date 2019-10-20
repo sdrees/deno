@@ -1,7 +1,7 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use super::dispatch_json::{Deserialize, JsonOp, Value};
-use crate::deno_error;
 use crate::fs as deno_fs;
+use crate::ops::json_op;
 use crate::resources;
 use crate::state::ThreadSafeState;
 use deno::*;
@@ -9,6 +9,12 @@ use futures::Future;
 use std;
 use std::convert::From;
 use tokio;
+
+pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
+  i.register_op("open", s.core_op(json_op(s.stateful_op(op_open))));
+  i.register_op("close", s.core_op(json_op(s.stateful_op(op_close))));
+  i.register_op("seek", s.core_op(json_op(s.stateful_op(op_seek))));
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +24,7 @@ struct OpenArgs {
   mode: String,
 }
 
-pub fn op_open(
+fn op_open(
   state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -97,20 +103,16 @@ struct CloseArgs {
   rid: i32,
 }
 
-pub fn op_close(
+fn op_close(
   _state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: CloseArgs = serde_json::from_value(args)?;
 
-  match resources::lookup(args.rid as u32) {
-    None => Err(deno_error::bad_resource()),
-    Some(resource) => {
-      resource.close();
-      Ok(JsonOp::Sync(json!({})))
-    }
-  }
+  let resource = resources::lookup(args.rid as u32)?;
+  resource.close();
+  Ok(JsonOp::Sync(json!({})))
 }
 
 #[derive(Deserialize)]
@@ -122,24 +124,20 @@ struct SeekArgs {
   whence: i32,
 }
 
-pub fn op_seek(
+fn op_seek(
   _state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: SeekArgs = serde_json::from_value(args)?;
 
-  match resources::lookup(args.rid as u32) {
-    None => Err(deno_error::bad_resource()),
-    Some(resource) => {
-      let op = resources::seek(resource, args.offset, args.whence as u32)
-        .and_then(move |_| futures::future::ok(json!({})));
-      if args.promise_id.is_none() {
-        let buf = op.wait()?;
-        Ok(JsonOp::Sync(buf))
-      } else {
-        Ok(JsonOp::Async(Box::new(op)))
-      }
-    }
+  let resource = resources::lookup(args.rid as u32)?;
+  let op = resources::seek(resource, args.offset, args.whence as u32)
+    .and_then(move |_| futures::future::ok(json!({})));
+  if args.promise_id.is_none() {
+    let buf = op.wait()?;
+    Ok(JsonOp::Sync(buf))
+  } else {
+    Ok(JsonOp::Async(Box::new(op)))
   }
 }

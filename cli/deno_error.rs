@@ -8,8 +8,10 @@ use deno::ErrBox;
 use deno::ModuleResolutionError;
 use http::uri;
 use hyper;
+use reqwest;
 use rustyline::error::ReadlineError;
 use std;
+use std::env::VarError;
 use std::error::Error;
 use std::fmt;
 use std::io;
@@ -19,6 +21,17 @@ use url;
 pub struct DenoError {
   kind: ErrorKind,
   msg: String,
+}
+
+pub fn print_err_and_exit(err: ErrBox) {
+  eprintln!("{}", err.to_string());
+  std::process::exit(1);
+}
+
+pub fn js_check(r: Result<(), ErrBox>) {
+  if let Err(err) = r {
+    print_err_and_exit(err);
+  }
 }
 
 impl DenoError {
@@ -124,6 +137,16 @@ impl GetErrorKind for ModuleResolutionError {
   }
 }
 
+impl GetErrorKind for VarError {
+  fn kind(&self) -> ErrorKind {
+    use VarError::*;
+    match self {
+      NotPresent => ErrorKind::NotFound,
+      NotUnicode(..) => ErrorKind::InvalidData,
+    }
+  }
+}
+
 impl GetErrorKind for io::Error {
   fn kind(&self) -> ErrorKind {
     use io::ErrorKind::*;
@@ -185,6 +208,26 @@ impl GetErrorKind for hyper::Error {
       e if e.is_closed() => ErrorKind::HttpClosed,
       e if e.is_parse() => ErrorKind::HttpParse,
       e if e.is_user() => ErrorKind::HttpUser,
+      _ => ErrorKind::HttpOther,
+    }
+  }
+}
+
+impl GetErrorKind for reqwest::Error {
+  fn kind(&self) -> ErrorKind {
+    use self::GetErrorKind as Get;
+
+    match self.get_ref() {
+      Some(err_ref) => None
+        .or_else(|| err_ref.downcast_ref::<hyper::Error>().map(Get::kind))
+        .or_else(|| err_ref.downcast_ref::<url::ParseError>().map(Get::kind))
+        .or_else(|| err_ref.downcast_ref::<io::Error>().map(Get::kind))
+        .or_else(|| {
+          err_ref
+            .downcast_ref::<serde_json::error::Error>()
+            .map(Get::kind)
+        })
+        .unwrap_or_else(|| ErrorKind::HttpOther),
       _ => ErrorKind::HttpOther,
     }
   }
@@ -254,6 +297,7 @@ impl GetErrorKind for dyn AnyError {
       .or_else(|| self.downcast_ref::<DenoError>().map(Get::kind))
       .or_else(|| self.downcast_ref::<Diagnostic>().map(Get::kind))
       .or_else(|| self.downcast_ref::<hyper::Error>().map(Get::kind))
+      .or_else(|| self.downcast_ref::<reqwest::Error>().map(Get::kind))
       .or_else(|| self.downcast_ref::<ImportMapError>().map(Get::kind))
       .or_else(|| self.downcast_ref::<io::Error>().map(Get::kind))
       .or_else(|| self.downcast_ref::<JSError>().map(Get::kind))
@@ -261,6 +305,7 @@ impl GetErrorKind for dyn AnyError {
       .or_else(|| self.downcast_ref::<StaticError>().map(Get::kind))
       .or_else(|| self.downcast_ref::<uri::InvalidUri>().map(Get::kind))
       .or_else(|| self.downcast_ref::<url::ParseError>().map(Get::kind))
+      .or_else(|| self.downcast_ref::<VarError>().map(Get::kind))
       .or_else(|| self.downcast_ref::<ReadlineError>().map(Get::kind))
       .or_else(|| {
         self
@@ -277,7 +322,7 @@ impl GetErrorKind for dyn AnyError {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::ansi::strip_ansi_codes;
+  use crate::colors::strip_ansi_codes;
   use crate::diagnostics::Diagnostic;
   use crate::diagnostics::DiagnosticCategory;
   use crate::diagnostics::DiagnosticItem;

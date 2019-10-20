@@ -6,23 +6,29 @@ extern crate serde_json;
 mod ops;
 use deno::js_check;
 pub use deno::v8_set_flags;
+use deno::CoreOp;
 use deno::ErrBox;
 use deno::Isolate;
 use deno::ModuleSpecifier;
+use deno::PinnedBuf;
 use deno::StartupData;
 pub use ops::EmitResult;
 use ops::WrittenFile;
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-static TYPESCRIPT_CODE: &str =
-  include_str!("../third_party/node_modules/typescript/lib/typescript.js");
+static TYPESCRIPT_CODE: &str = include_str!("typescript/lib/typescript.js");
 static COMPILER_CODE: &str = include_str!("compiler_main.js");
 static AMD_RUNTIME_CODE: &str = include_str!("amd_runtime.js");
+
+pub fn ts_version() -> String {
+  let data = include_str!("typescript/package.json");
+  let pkg: serde_json::Value = serde_json::from_str(data).unwrap();
+  pkg["version"].as_str().unwrap().to_string()
+}
 
 #[derive(Debug)]
 pub struct TSState {
@@ -38,6 +44,20 @@ impl TSState {
   fn main_module_name(&self) -> String {
     // Assuming that TypeScript has emitted the main file last.
     self.written_files.last().unwrap().module_name.clone()
+  }
+}
+
+fn compiler_op<D>(
+  ts_state: Arc<Mutex<TSState>>,
+  dispatcher: D,
+) -> impl Fn(&[u8], Option<PinnedBuf>) -> CoreOp
+where
+  D: Fn(&mut TSState, &[u8]) -> CoreOp,
+{
+  move |control: &[u8], zero_copy_buf: Option<PinnedBuf>| -> CoreOp {
+    assert!(zero_copy_buf.is_none()); // zero_copy_buf unused in compiler.
+    let mut s = ts_state.lock().unwrap();
+    dispatcher(&mut s, control)
   }
 }
 
@@ -58,12 +78,26 @@ impl TSIsolate {
       emit_result: None,
       written_files: Vec::new(),
     }));
-    let state_ = state.clone();
-    isolate.set_dispatch(move |op_id, control_buf, zero_copy_buf| {
-      assert!(zero_copy_buf.is_none()); // zero_copy_buf unused in compiler.
-      let mut s = state_.lock().unwrap();
-      ops::dispatch_op(&mut s, op_id, control_buf)
-    });
+
+    isolate.register_op(
+      "readFile",
+      compiler_op(state.clone(), ops::json_op(ops::read_file)),
+    );
+    isolate
+      .register_op("exit", compiler_op(state.clone(), ops::json_op(ops::exit)));
+    isolate.register_op(
+      "writeFile",
+      compiler_op(state.clone(), ops::json_op(ops::write_file)),
+    );
+    isolate.register_op(
+      "resolveModuleNames",
+      compiler_op(state.clone(), ops::json_op(ops::resolve_module_names)),
+    );
+    isolate.register_op(
+      "setEmitResult",
+      compiler_op(state.clone(), ops::json_op(ops::set_emit_result)),
+    );
+
     TSIsolate { isolate, state }
   }
 
@@ -78,12 +112,8 @@ impl TSIsolate {
     root_names: Vec<String>,
   ) -> Result<Arc<Mutex<TSState>>, ErrBox> {
     let root_names_json = serde_json::json!(root_names).to_string();
-    let source = &format!(
-      "main({:?}, {}, {})",
-      config_json.to_string(),
-      root_names_json,
-      preprocessor_replacements_json()
-    );
+    let source =
+      &format!("main({:?}, {})", config_json.to_string(), root_names_json);
     self.isolate.execute("<anon>", source)?;
     Ok(self.state.clone())
   }
@@ -201,15 +231,6 @@ fn write_snapshot(
   Ok(())
 }
 
-macro_rules! inc {
-  ($e:expr) => {
-    Some(include_str!(concat!(
-      "../third_party/node_modules/typescript/lib/",
-      $e
-    )))
-  };
-}
-
 /// Same as get_asset() but returns NotFound intead of None.
 pub fn get_asset2(name: &str) -> Result<&'static str, ErrBox> {
   match get_asset(name) {
@@ -222,8 +243,14 @@ pub fn get_asset2(name: &str) -> Result<&'static str, ErrBox> {
 }
 
 pub fn get_asset(name: &str) -> Option<&'static str> {
+  macro_rules! inc {
+    ($e:expr) => {
+      Some(include_str!(concat!("typescript/lib/", $e)))
+    };
+  }
   match name {
     "lib.deno_core.d.ts" => Some(include_str!("lib.deno_core.d.ts")),
+    "typescript.d.ts" => inc!("typescript.d.ts"),
     "lib.esnext.d.ts" => inc!("lib.esnext.d.ts"),
     "lib.es2019.d.ts" => inc!("lib.es2019.d.ts"),
     "lib.es2018.d.ts" => inc!("lib.es2018.d.ts"),
@@ -248,6 +275,7 @@ pub fn get_asset(name: &str) -> Option<&'static str> {
     "lib.es2017.string.d.ts" => inc!("lib.es2017.string.d.ts"),
     "lib.es2017.intl.d.ts" => inc!("lib.es2017.intl.d.ts"),
     "lib.es2017.typedarrays.d.ts" => inc!("lib.es2017.typedarrays.d.ts"),
+    "lib.es2018.asyncgenerator.d.ts" => inc!("lib.es2018.asyncgenerator.d.ts"),
     "lib.es2018.asynciterable.d.ts" => inc!("lib.es2018.asynciterable.d.ts"),
     "lib.es2018.promise.d.ts" => inc!("lib.es2018.promise.d.ts"),
     "lib.es2018.regexp.d.ts" => inc!("lib.es2018.regexp.d.ts"),
@@ -268,21 +296,4 @@ pub fn trace_serializer() {
   let r =
     deno::v8_set_flags(vec![dummy.clone(), "--trace-serializer".to_string()]);
   assert_eq!(r, vec![dummy]);
-}
-
-fn preprocessor_replacements_json() -> String {
-  /// BUILD_OS and BUILD_ARCH match the values in Deno.build. See js/build.ts.
-  #[cfg(target_os = "macos")]
-  static BUILD_OS: &str = "mac";
-  #[cfg(target_os = "linux")]
-  static BUILD_OS: &str = "linux";
-  #[cfg(target_os = "windows")]
-  static BUILD_OS: &str = "win";
-  #[cfg(target_arch = "x86_64")]
-  static BUILD_ARCH: &str = "x64";
-
-  let mut replacements = HashMap::new();
-  replacements.insert("DENO_REPLACE_OS", BUILD_OS);
-  replacements.insert("DENO_REPLACE_ARCH", BUILD_ARCH);
-  serde_json::json!(replacements).to_string()
 }

@@ -1,7 +1,8 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use super::dispatch_json::{Deserialize, JsonOp, Value};
-use crate::ansi;
+use crate::colors;
 use crate::fs as deno_fs;
+use crate::ops::json_op;
 use crate::state::ThreadSafeState;
 use crate::version;
 use atty;
@@ -9,9 +10,32 @@ use deno::*;
 use log;
 use std::collections::HashMap;
 use std::env;
+use sys_info;
 use url::Url;
 
-pub fn op_start(
+/// BUILD_OS and BUILD_ARCH match the values in Deno.build. See js/build.ts.
+#[cfg(target_os = "macos")]
+static BUILD_OS: &str = "mac";
+#[cfg(target_os = "linux")]
+static BUILD_OS: &str = "linux";
+#[cfg(target_os = "windows")]
+static BUILD_OS: &str = "win";
+#[cfg(target_arch = "x86_64")]
+static BUILD_ARCH: &str = "x64";
+
+pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
+  i.register_op("exit", s.core_op(json_op(s.stateful_op(op_exit))));
+  i.register_op("is_tty", s.core_op(json_op(s.stateful_op(op_is_tty))));
+  i.register_op("env", s.core_op(json_op(s.stateful_op(op_env))));
+  i.register_op("exec_path", s.core_op(json_op(s.stateful_op(op_exec_path))));
+  i.register_op("set_env", s.core_op(json_op(s.stateful_op(op_set_env))));
+  i.register_op("get_env", s.core_op(json_op(s.stateful_op(op_get_env))));
+  i.register_op("home_dir", s.core_op(json_op(s.stateful_op(op_home_dir))));
+  i.register_op("hostname", s.core_op(json_op(s.stateful_op(op_hostname))));
+  i.register_op("start", s.core_op(json_op(s.stateful_op(op_start))));
+}
+
+fn op_start(
   state: &ThreadSafeState,
   _args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -28,13 +52,14 @@ pub fn op_start(
     "versionFlag": state.flags.version,
     "v8Version": version::v8(),
     "denoVersion": version::DENO,
-    "tsVersion": version::typescript(),
-    "noColor": !ansi::use_color(),
-    "xevalDelim": state.flags.xeval_delim.clone(),
+    "tsVersion": version::TYPESCRIPT,
+    "noColor": !colors::use_color(),
+    "os": BUILD_OS,
+    "arch": BUILD_ARCH,
   })))
 }
 
-pub fn op_home_dir(
+fn op_home_dir(
   state: &ThreadSafeState,
   _args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -48,7 +73,7 @@ pub fn op_home_dir(
   Ok(JsonOp::Sync(json!(path)))
 }
 
-pub fn op_exec_path(
+fn op_exec_path(
   state: &ThreadSafeState,
   _args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -68,7 +93,7 @@ struct SetEnv {
   value: String,
 }
 
-pub fn op_set_env(
+fn op_set_env(
   state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -79,7 +104,7 @@ pub fn op_set_env(
   Ok(JsonOp::Sync(json!({})))
 }
 
-pub fn op_env(
+fn op_env(
   state: &ThreadSafeState,
   _args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -90,11 +115,30 @@ pub fn op_env(
 }
 
 #[derive(Deserialize)]
+struct GetEnv {
+  key: String,
+}
+
+fn op_get_env(
+  state: &ThreadSafeState,
+  args: Value,
+  _zero_copy: Option<PinnedBuf>,
+) -> Result<JsonOp, ErrBox> {
+  let args: GetEnv = serde_json::from_value(args)?;
+  state.check_env()?;
+  let r = match env::var(args.key) {
+    Err(env::VarError::NotPresent) => json!([]),
+    v => json!([v?]),
+  };
+  Ok(JsonOp::Sync(r))
+}
+
+#[derive(Deserialize)]
 struct Exit {
   code: i32,
 }
 
-pub fn op_exit(
+fn op_exit(
   _s: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -103,7 +147,7 @@ pub fn op_exit(
   std::process::exit(args.code)
 }
 
-pub fn op_is_tty(
+fn op_is_tty(
   _s: &ThreadSafeState,
   _args: Value,
   _zero_copy: Option<PinnedBuf>,
@@ -113,4 +157,14 @@ pub fn op_is_tty(
     "stdout": atty::is(atty::Stream::Stdout),
     "stderr": atty::is(atty::Stream::Stderr),
   })))
+}
+
+fn op_hostname(
+  state: &ThreadSafeState,
+  _args: Value,
+  _zero_copy: Option<PinnedBuf>,
+) -> Result<JsonOp, ErrBox> {
+  state.check_env()?;
+  let hostname = sys_info::hostname().unwrap_or_else(|_| "".to_owned());
+  Ok(JsonOp::Sync(json!(hostname)))
 }

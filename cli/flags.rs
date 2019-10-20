@@ -11,6 +11,22 @@ use log::Level;
 use std;
 use std::str;
 use std::str::FromStr;
+use url::Url;
+
+macro_rules! std_url {
+  ($x:expr) => {
+    concat!("https://deno.land/std@8c90bd9/", $x)
+  };
+}
+
+/// Used for `deno fmt <files>...` subcommand
+const PRETTIER_URL: &str = std_url!("prettier/main.ts");
+/// Used for `deno install...` subcommand
+const INSTALLER_URL: &str = std_url!("installer/mod.ts");
+/// Used for `deno test...` subcommand
+const TEST_RUNNER_URL: &str = std_url!("testing/runner.ts");
+/// Used for `deno xeval...` subcommand
+const XEVAL_URL: &str = std_url!("xeval/mod.ts");
 
 // Creates vector of strings, Vec<String>
 macro_rules! svec {
@@ -30,6 +46,7 @@ pub struct DenoFlags {
   pub import_map_path: Option<String>,
   pub allow_read: bool,
   pub read_whitelist: Vec<String>,
+  pub cache_blacklist: Vec<String>,
   pub allow_write: bool,
   pub write_whitelist: Vec<String>,
   pub allow_net: bool,
@@ -41,15 +58,15 @@ pub struct DenoFlags {
   pub no_fetch: bool,
   pub seed: Option<u64>,
   pub v8_flags: Option<Vec<String>>,
-  pub xeval_replvar: Option<String>,
-  pub xeval_delim: Option<String>,
   // Use tokio::runtime::current_thread
   pub current_thread: bool,
 }
 
 static ENV_VARIABLES_HELP: &str = "ENVIRONMENT VARIABLES:
     DENO_DIR        Set deno's base directory
-    NO_COLOR        Set to disable color";
+    NO_COLOR        Set to disable color
+    HTTP_PROXY      Set proxy address for HTTP requests (module downloads, fetch)
+    HTTPS_PROXY     Set proxy address for HTTPS requests (module downloads, fetch)";
 
 fn add_run_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
   app
@@ -122,7 +139,7 @@ pub fn create_cli_app<'a, 'b>() -> App<'a, 'b> {
     .long_about("A secure runtime for JavaScript and TypeScript built with V8, Rust, and Tokio.
 
 Docs: https://deno.land/manual.html
-Modules: https://github.com/denoland/deno_std
+Modules: https://deno.land/x/
 Bugs: https://github.com/denoland/deno/issues
 
 To run the REPL:
@@ -157,8 +174,20 @@ To get help on the another subcommands (run in this case):
     ).arg(
       Arg::with_name("reload")
         .short("r")
+        .min_values(0)
+        .takes_value(true)
+        .use_delimiter(true)
+        .require_equals(true)
         .long("reload")
         .help("Reload source code cache (recompile TypeScript)")
+        .value_name("CACHE_BLACKLIST")
+        .long_help("Reload source code cache (recompile TypeScript)
+          --reload
+            Reload everything
+          --reload=https://deno.land/std
+            Reload all standard modules
+          --reload=https://deno.land/std/fs/utils.ts,https://deno.land/std/fmt/colors.ts
+            Reloads specific modules")
         .global(true),
     ).arg(
       Arg::with_name("config")
@@ -494,6 +523,58 @@ fn resolve_paths(paths: Vec<String>) -> Vec<String> {
   out
 }
 
+pub fn resolve_urls(urls: Vec<String>) -> Vec<String> {
+  let mut out: Vec<String> = vec![];
+  for urlstr in urls.iter() {
+    let result = Url::from_str(urlstr);
+    if result.is_err() {
+      panic!("Bad Url: {}", urlstr);
+    }
+    let mut url = result.unwrap();
+    url.set_fragment(None);
+    let mut full_url = String::from(url.as_str());
+    if full_url.len() > 1 && full_url.ends_with('/') {
+      full_url.pop();
+    }
+    out.push(full_url);
+  }
+  out
+}
+/// This function expands "bare port" paths (eg. ":8080")
+/// into full paths with hosts. It expands to such paths
+/// into 3 paths with following hosts: `0.0.0.0:port`, `127.0.0.1:port` and `localhost:port`.
+fn resolve_hosts(paths: Vec<String>) -> Vec<String> {
+  let mut out: Vec<String> = vec![];
+  for host_and_port in paths.iter() {
+    let parts = host_and_port.split(':').collect::<Vec<&str>>();
+
+    match parts.len() {
+      // host only
+      1 => {
+        out.push(host_and_port.to_owned());
+      }
+      // host and port (NOTE: host might be empty string)
+      2 => {
+        let host = parts[0];
+        let port = parts[1];
+
+        if !host.is_empty() {
+          out.push(host_and_port.to_owned());
+          continue;
+        }
+
+        // we got bare port, let's add default hosts
+        for host in ["0.0.0.0", "127.0.0.1", "localhost"].iter() {
+          out.push(format!("{}:{}", host, port));
+        }
+      }
+      _ => panic!("Bad host:port pair: {}", host_and_port),
+    }
+  }
+
+  out
+}
+
 /// Parse ArgMatches into internal DenoFlags structure.
 /// This method should not make any side effects.
 pub fn parse_flags(
@@ -516,7 +597,16 @@ pub fn parse_flags(
     flags.version = true;
   }
   if matches.is_present("reload") {
-    flags.reload = true;
+    if matches.value_of("reload").is_some() {
+      let cache_bl = matches.values_of("reload").unwrap();
+      let raw_cache_blacklist: Vec<String> =
+        cache_bl.map(std::string::ToString::to_string).collect();
+      flags.cache_blacklist = resolve_urls(raw_cache_blacklist);
+      debug!("cache blacklist: {:#?}", &flags.cache_blacklist);
+      flags.reload = false;
+    } else {
+      flags.reload = true;
+    }
   }
   flags.config_path = matches.value_of("config").map(ToOwned::to_owned);
   if matches.is_present("v8-options") {
@@ -591,8 +681,9 @@ fn parse_run_args(mut flags: DenoFlags, matches: &ArgMatches) -> DenoFlags {
   if matches.is_present("allow-net") {
     if matches.value_of("allow-net").is_some() {
       let net_wl = matches.values_of("allow-net").unwrap();
-      flags.net_whitelist =
+      let raw_net_whitelist =
         net_wl.map(std::string::ToString::to_string).collect();
+      flags.net_whitelist = resolve_hosts(raw_net_whitelist);
       debug!("net whitelist: {:#?}", &flags.net_whitelist);
     } else {
       flags.allow_net = true;
@@ -667,8 +758,8 @@ fn parse_script_args(
     let matches =
       cli_app.get_matches_from_safe(vec!["deno".to_string(), arg.to_string()]);
 
-    if matches.is_ok() {
-      flags = parse_flags(&matches.unwrap(), Some(flags));
+    if let Ok(m) = matches {
+      flags = parse_flags(&m, Some(flags));
     } else {
       argv.push(arg.to_string());
     }
@@ -676,13 +767,6 @@ fn parse_script_args(
 
   (argv, flags)
 }
-
-/// Used for `deno fmt <files>...` subcommand
-const PRETTIER_URL: &str = "https://deno.land/std@v0.11/prettier/main.ts";
-/// Used for `deno install...` subcommand
-const INSTALLER_URL: &str = "https://deno.land/std@v0.11/installer/mod.ts";
-/// Used for `deno test...` subcommand
-const TEST_RUNNER_URL: &str = "https://deno.land/std@4531fa8/testing/runner.ts";
 
 /// These are currently handled subcommands.
 /// There is no "Help" subcommand because it's handled by `clap::App` itself.
@@ -697,7 +781,6 @@ pub enum DenoSubcommand {
   Run,
   Types,
   Version,
-  Xeval,
 }
 
 fn get_default_bundle_filename(source_file: &str) -> String {
@@ -891,22 +974,31 @@ pub fn flags_from_vec(
         _ => unreachable!(),
       }
     }
-    ("xeval", Some(eval_match)) => {
+    ("xeval", Some(xeval_match)) => {
       flags.allow_net = true;
       flags.allow_env = true;
       flags.allow_run = true;
       flags.allow_read = true;
       flags.allow_write = true;
       flags.allow_hrtime = true;
-      let code: &str = eval_match.value_of("code").unwrap();
-      flags.xeval_replvar =
-        Some(eval_match.value_of("replvar").unwrap_or("$").to_owned());
-      // Currently clap never escapes string,
-      // So -d "\n" won't expand to newline.
-      // Instead, do -d $'\n'
-      flags.xeval_delim = eval_match.value_of("delim").map(String::from);
-      argv.extend(vec![code.to_string()]);
-      DenoSubcommand::Xeval
+      argv.push(XEVAL_URL.to_string());
+
+      if xeval_match.is_present("delim") {
+        let delim = xeval_match.value_of("delim").unwrap();
+        argv.push("--delim".to_string());
+        argv.push(delim.to_string());
+      }
+
+      if xeval_match.is_present("replvar") {
+        let replvar = xeval_match.value_of("replvar").unwrap();
+        argv.push("--replvar".to_string());
+        argv.push(replvar.to_string());
+      }
+
+      let code: &str = xeval_match.value_of("code").unwrap();
+      argv.push(code.to_string());
+
+      DenoSubcommand::Run
     }
     (script, Some(script_match)) => {
       argv.extend(vec![script.to_string()]);
@@ -1283,13 +1375,22 @@ mod tests {
         allow_read: true,
         allow_write: true,
         allow_hrtime: true,
-        xeval_replvar: Some("val".to_owned()),
-        xeval_delim: Some(" ".to_owned()),
         ..DenoFlags::default()
       }
     );
-    assert_eq!(subcommand, DenoSubcommand::Xeval);
-    assert_eq!(argv, svec!["deno", "console.log(val)"]);
+    assert_eq!(subcommand, DenoSubcommand::Run);
+    assert_eq!(
+      argv,
+      svec![
+        "deno",
+        XEVAL_URL,
+        "--delim",
+        " ",
+        "--replvar",
+        "val",
+        "console.log(val)"
+      ]
+    );
   }
 
   #[test]
@@ -1770,5 +1871,31 @@ mod tests {
         "**/*_test.ts"
       ]
     )
+  }
+
+  #[test]
+  fn test_flags_from_vec_37() {
+    let (flags, subcommand, argv) = flags_from_vec(svec![
+      "deno",
+      "--allow-net=deno.land,:8000,:4545",
+      "script.ts"
+    ]);
+    assert_eq!(
+      flags,
+      DenoFlags {
+        net_whitelist: svec![
+          "deno.land",
+          "0.0.0.0:8000",
+          "127.0.0.1:8000",
+          "localhost:8000",
+          "0.0.0.0:4545",
+          "127.0.0.1:4545",
+          "localhost:4545"
+        ],
+        ..DenoFlags::default()
+      }
+    );
+    assert_eq!(subcommand, DenoSubcommand::Run);
+    assert_eq!(argv, svec!["deno", "script.ts"])
   }
 }

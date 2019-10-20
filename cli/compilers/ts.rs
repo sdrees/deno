@@ -22,6 +22,7 @@ use ring;
 use std::collections::HashSet;
 use std::fmt::Write;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::str;
 use std::sync::atomic::Ordering;
@@ -60,7 +61,20 @@ impl CompilerConfig {
     // Convert the PathBuf to a canonicalized string.  This is needed by the
     // compiler to properly deal with the configuration.
     let config_path = match &config_file {
-      Some(config_file) => Some(config_file.canonicalize().unwrap().to_owned()),
+      Some(config_file) => Some(
+        config_file
+          .canonicalize()
+          .map_err(|_| {
+            io::Error::new(
+              io::ErrorKind::InvalidInput,
+              format!(
+                "Could not find the config file: {}",
+                config_file.to_string_lossy()
+              ),
+            )
+          })?
+          .to_owned(),
+      ),
       _ => None,
     };
 
@@ -642,50 +656,46 @@ mod tests {
   use crate::fs as deno_fs;
   use crate::tokio_util;
   use deno::ModuleSpecifier;
+  use futures::future::lazy;
   use std::path::PathBuf;
   use tempfile::TempDir;
 
-  impl TsCompiler {
-    fn compile_sync(
-      self: &Self,
-      state: ThreadSafeState,
-      source_file: &SourceFile,
-    ) -> Result<CompiledModule, ErrBox> {
-      tokio_util::block_on(self.compile_async(state, source_file))
-    }
-  }
-
   #[test]
-  fn test_compile_sync() {
-    tokio_util::init(|| {
-      let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("tests/002_hello.ts")
-        .to_owned();
-      let specifier =
-        ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap()).unwrap();
+  fn test_compile_async() {
+    let p = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+      .parent()
+      .unwrap()
+      .join("tests/002_hello.ts")
+      .to_owned();
+    let specifier =
+      ModuleSpecifier::resolve_url_or_path(p.to_str().unwrap()).unwrap();
 
-      let out = SourceFile {
-        url: specifier.as_url().clone(),
-        filename: PathBuf::from(p.to_str().unwrap().to_string()),
-        media_type: msg::MediaType::TypeScript,
-        source_code: include_bytes!("../../tests/002_hello.ts").to_vec(),
-      };
+    let out = SourceFile {
+      url: specifier.as_url().clone(),
+      filename: PathBuf::from(p.to_str().unwrap().to_string()),
+      media_type: msg::MediaType::TypeScript,
+      source_code: include_bytes!("../tests/002_hello.ts").to_vec(),
+    };
 
-      let mock_state = ThreadSafeState::mock(vec![
-        String::from("deno"),
-        String::from("hello.js"),
-      ]);
-      let compiled = mock_state
+    let mock_state = ThreadSafeState::mock(vec![
+      String::from("deno"),
+      String::from("hello.js"),
+    ]);
+
+    tokio_util::run(lazy(move || {
+      mock_state
         .ts_compiler
-        .compile_sync(mock_state.clone(), &out)
-        .unwrap();
-      assert!(compiled
-        .code
-        .as_bytes()
-        .starts_with("console.log(\"Hello World\");".as_bytes()));
-    })
+        .compile_async(mock_state.clone(), &out)
+        .then(|result| {
+          assert!(result.is_ok());
+          assert!(result
+            .unwrap()
+            .code
+            .as_bytes()
+            .starts_with("console.log(\"Hello World\");".as_bytes()));
+          Ok(())
+        })
+    }))
   }
 
   #[test]
@@ -705,12 +715,20 @@ mod tests {
       p.to_string_lossy().into(),
       String::from("$deno$/bundle.js"),
     ]);
-    let out = state.ts_compiler.bundle_async(
-      state.clone(),
-      module_name,
-      String::from("$deno$/bundle.js"),
-    );
-    assert!(tokio_util::block_on(out).is_ok());
+
+    tokio_util::run(lazy(move || {
+      state
+        .ts_compiler
+        .bundle_async(
+          state.clone(),
+          module_name,
+          String::from("$deno$/bundle.js"),
+        )
+        .then(|result| {
+          assert!(result.is_ok());
+          Ok(())
+        })
+    }))
   }
 
   #[test]
@@ -772,5 +790,15 @@ mod tests {
       let config = CompilerConfig::load(Some(path_str.clone())).unwrap();
       assert_eq!(config.compile_js, expected);
     }
+  }
+
+  #[test]
+  fn test_compiler_config_load() {
+    let temp_dir = TempDir::new().expect("tempdir fail");
+    let temp_dir_path = temp_dir.path();
+    let path = temp_dir_path.join("doesnotexist.json");
+    let path_str = path.to_str().unwrap().to_string();
+    let res = CompilerConfig::load(Some(path_str.clone()));
+    assert!(res.is_err());
   }
 }

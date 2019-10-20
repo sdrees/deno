@@ -1,8 +1,5 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
-import {
-  serve,
-  ServerRequest
-} from "../js/deps/https/deno.land/std/http/server.ts";
+import { serve, ServerRequest } from "../std/http/server.ts";
 
 const addr = Deno.args[1] || "127.0.0.1:4500";
 const originAddr = Deno.args[2] || "127.0.0.1:4501";
@@ -15,7 +12,7 @@ async function main(): Promise<void> {
   }
 }
 
-async function proxyRequest(req: ServerRequest) {
+async function proxyRequest(req: ServerRequest): Promise<void> {
   const url = `http://${originAddr}${req.url}`;
   const resp = await fetch(url, {
     method: req.method,
