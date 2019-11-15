@@ -14,6 +14,7 @@ import {
   ServerRequest,
   writeResponse,
   readRequest,
+  serve,
   parseHTTPVersion
 } from "./server.ts";
 import { delay } from "../util/async.ts";
@@ -504,11 +505,9 @@ test({
 
       let serverIsRunning = true;
       p.status()
-        .then(
-          (): void => {
-            serverIsRunning = false;
-          }
-        )
+        .then((): void => {
+          serverIsRunning = false;
+        })
         .catch((_): void => {}); // Ignores the error when closing the process.
 
       await delay(100);
@@ -526,6 +525,68 @@ test({
       // Stops the sever.
       p.close();
     }
+  }
+});
+
+test({
+  name: "[http] serveTLS",
+  async fn(): Promise<void> {
+    // Runs a simple server as another process
+    const p = Deno.run({
+      args: [
+        Deno.execPath(),
+        "http/testdata/simple_https_server.ts",
+        "--allow-net",
+        "--allow-read"
+      ],
+      stdout: "piped"
+    });
+
+    try {
+      const r = new TextProtoReader(new BufReader(p.stdout!));
+      const s = await r.readLine();
+      assert(s !== Deno.EOF && s.includes("server listening"));
+
+      let serverIsRunning = true;
+      p.status()
+        .then((): void => {
+          serverIsRunning = false;
+        })
+        .catch((_): void => {}); // Ignores the error when closing the process.
+
+      // Requests to the server and immediately closes the connection
+      const conn = await Deno.dialTLS({
+        hostname: "localhost",
+        port: 4503,
+        certFile: "http/testdata/tls/RootCA.pem"
+      });
+      await Deno.writeAll(
+        conn,
+        new TextEncoder().encode("GET / HTTP/1.0\r\n\r\n")
+      );
+      const res = new Uint8Array(100);
+      const nread = assertNotEOF(await conn.read(res));
+      conn.close();
+      const resStr = new TextDecoder().decode(res.subarray(0, nread));
+      assert(resStr.includes("Hello HTTPS"));
+      assert(serverIsRunning);
+    } finally {
+      // Stops the sever.
+      p.close();
+    }
+  }
+});
+
+test({
+  name: "[http] close server while iterating",
+  async fn(): Promise<void> {
+    const server = serve(":8123");
+    const nextWhileClosing = server[Symbol.asyncIterator]().next();
+    server.close();
+    assertEquals(await nextWhileClosing, { value: undefined, done: true });
+
+    const nextAfterClosing = server[Symbol.asyncIterator]().next();
+    assertEquals(await nextAfterClosing, { value: undefined, done: true });
   }
 });
 

@@ -1,10 +1,10 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
 use super::dispatch_json::{Deserialize, JsonOp, Value};
+use crate::deno_error::bad_resource;
 use crate::deno_error::js_check;
 use crate::deno_error::DenoError;
 use crate::deno_error::ErrorKind;
 use crate::ops::json_op;
-use crate::resources;
 use crate::startup_data;
 use crate::state::ThreadSafeState;
 use crate::worker::Worker;
@@ -48,18 +48,17 @@ pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
 }
 
 struct GetMessageFuture {
-  pub state: ThreadSafeState,
+  state: ThreadSafeState,
 }
 
 impl Future for GetMessageFuture {
   type Item = Option<Buf>;
-  type Error = ();
+  type Error = ErrBox;
 
   fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-    let mut wc = self.state.worker_channels.lock().unwrap();
-    wc.1
-      .poll()
-      .map_err(|err| panic!("worker_channel recv err {:?}", err))
+    let mut channels = self.state.worker_channels.lock().unwrap();
+    let receiver = &mut channels.receiver;
+    receiver.poll().map_err(ErrBox::from)
   }
 }
 
@@ -93,12 +92,10 @@ fn op_worker_post_message(
   data: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let d = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
-
-  let tx = {
-    let wc = state.worker_channels.lock().unwrap();
-    wc.0.clone()
-  };
-  tx.send(d)
+  let mut channels = state.worker_channels.lock().unwrap();
+  let sender = &mut channels.sender;
+  sender
+    .send(d)
     .wait()
     .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
 
@@ -132,37 +129,32 @@ fn op_create_worker(
 
   let parent_state = state.clone();
 
+  // TODO(bartlomieju): Isn't this wrong?
   let mut module_specifier = ModuleSpecifier::resolve_url_or_path(specifier)?;
-
-  let mut child_argv = parent_state.argv.clone();
-
   if !has_source_code {
-    if let Some(module) = state.main_module() {
-      module_specifier =
-        ModuleSpecifier::resolve_import(specifier, &module.to_string())?;
-      child_argv[1] = module_specifier.to_string();
+    if let Some(referrer) = parent_state.main_module.as_ref() {
+      let referrer = referrer.clone().to_string();
+      module_specifier = ModuleSpecifier::resolve_import(specifier, &referrer)?;
     }
   }
 
+  let (int, ext) = ThreadSafeState::create_channels();
   let child_state = ThreadSafeState::new(
-    parent_state.flags.clone(),
-    child_argv,
-    parent_state.progress.clone(),
+    state.global_state.clone(),
+    Some(module_specifier.clone()),
     include_deno_namespace,
+    int,
   )?;
-  let rid = child_state.resource.rid;
   let name = format!("USER-WORKER-{}", specifier);
   let deno_main_call = format!("denoMain({})", include_deno_namespace);
-
   let mut worker =
-    Worker::new(name, startup_data::deno_isolate_init(), child_state);
+    Worker::new(name, startup_data::deno_isolate_init(), child_state, ext);
   js_check(worker.execute(&deno_main_call));
   js_check(worker.execute("workerMain()"));
 
   let exec_cb = move |worker: Worker| {
-    let mut workers_tl = parent_state.workers.lock().unwrap();
-    workers_tl.insert(rid, worker.shared());
-    json!(rid)
+    let worker_id = parent_state.add_child_worker(worker);
+    json!(worker_id)
   };
 
   // Has provided source code, execute immediately.
@@ -181,7 +173,7 @@ fn op_create_worker(
 
 #[derive(Deserialize)]
 struct HostGetWorkerClosedArgs {
-  rid: i32,
+  id: i32,
 }
 
 /// Return when the worker closes
@@ -191,38 +183,41 @@ fn op_host_get_worker_closed(
   _data: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: HostGetWorkerClosedArgs = serde_json::from_value(args)?;
+  let id = args.id as u32;
+  let state_ = state.clone();
+  let workers_table = state.workers.lock().unwrap();
+  // TODO: handle bad worker id gracefully
+  let worker = workers_table.get(&id).unwrap();
+  let shared_worker_future = worker.clone().shared();
 
-  let rid = args.rid as u32;
-  let state = state.clone();
-
-  let shared_worker_future = {
-    let workers_tl = state.workers.lock().unwrap();
-    let worker = workers_tl.get(&rid).unwrap();
-    worker.clone()
-  };
-
-  let op = Box::new(
-    shared_worker_future.then(move |_result| futures::future::ok(json!({}))),
-  );
+  let op = shared_worker_future.then(move |_result| {
+    let mut workers_table = state_.workers.lock().unwrap();
+    workers_table.remove(&id);
+    futures::future::ok(json!({}))
+  });
 
   Ok(JsonOp::Async(Box::new(op)))
 }
 
 #[derive(Deserialize)]
 struct HostGetMessageArgs {
-  rid: i32,
+  id: i32,
 }
 
 /// Get message from guest worker as host
 fn op_host_get_message(
-  _state: &ThreadSafeState,
+  state: &ThreadSafeState,
   args: Value,
   _data: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: HostGetMessageArgs = serde_json::from_value(args)?;
 
-  let rid = args.rid as u32;
-  let op = resources::get_message_from_worker(rid)
+  let id = args.id as u32;
+  let mut table = state.workers.lock().unwrap();
+  // TODO: don't return bad resource anymore
+  let worker = table.get_mut(&id).ok_or_else(bad_resource)?;
+  let op = worker
+    .get_message()
     .map_err(move |_| -> ErrBox { unimplemented!() })
     .and_then(move |maybe_buf| {
       futures::future::ok(json!({
@@ -235,25 +230,26 @@ fn op_host_get_message(
 
 #[derive(Deserialize)]
 struct HostPostMessageArgs {
-  rid: i32,
+  id: i32,
 }
 
 /// Post message to guest worker as host
 fn op_host_post_message(
-  _state: &ThreadSafeState,
+  state: &ThreadSafeState,
   args: Value,
   data: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
   let args: HostPostMessageArgs = serde_json::from_value(args)?;
+  let id = args.id as u32;
+  let msg = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
 
-  let rid = args.rid as u32;
-
-  let d = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
-
-  resources::post_message_to_worker(rid, d)
-    .wait()
+  debug!("post message to worker {}", id);
+  let mut table = state.workers.lock().unwrap();
+  // TODO: don't return bad resource anymore
+  let worker = table.get_mut(&id).ok_or_else(bad_resource)?;
+  worker
+    .post_message(msg)
     .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
-
   Ok(JsonOp::Sync(json!({})))
 }
 

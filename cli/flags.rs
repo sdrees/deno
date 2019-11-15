@@ -6,7 +6,6 @@ use clap::Arg;
 use clap::ArgMatches;
 use clap::Shell;
 use clap::SubCommand;
-use deno::ModuleSpecifier;
 use log::Level;
 use std;
 use std::str;
@@ -15,7 +14,7 @@ use url::Url;
 
 macro_rules! std_url {
   ($x:expr) => {
-    concat!("https://deno.land/std@8c90bd9/", $x)
+    concat!("https://deno.land/std@v0.23.0/", $x)
   };
 }
 
@@ -38,11 +37,7 @@ pub struct DenoFlags {
   pub log_level: Option<Level>,
   pub version: bool,
   pub reload: bool,
-  /// When the `--config`/`-c` flag is used to pass the name, this will be set
-  /// the path passed on the command line, otherwise `None`.
   pub config_path: Option<String>,
-  /// When the `--importmap` flag is used to pass the name, this will be set
-  /// the path passed on the command line, otherwise `None`.
   pub import_map_path: Option<String>,
   pub allow_read: bool,
   pub read_whitelist: Vec<String>,
@@ -60,6 +55,9 @@ pub struct DenoFlags {
   pub v8_flags: Option<Vec<String>>,
   // Use tokio::runtime::current_thread
   pub current_thread: bool,
+
+  pub lock: Option<String>,
+  pub lock_write: bool,
 }
 
 static ENV_VARIABLES_HELP: &str = "ENVIRONMENT VARIABLES:
@@ -119,11 +117,6 @@ fn add_run_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
         .help("Allow all permissions"),
     )
     .arg(
-      Arg::with_name("no-prompt")
-        .long("no-prompt")
-        .help("Do not use prompts"),
-    )
-    .arg(
       Arg::with_name("no-fetch")
         .long("no-fetch")
         .help("Do not download remote modules"),
@@ -136,7 +129,7 @@ pub fn create_cli_app<'a, 'b>() -> App<'a, 'b> {
     .global_settings(&[AppSettings::ColorNever, AppSettings::UnifiedHelpMessage, AppSettings::DisableVersion])
     .settings(&[AppSettings::AllowExternalSubcommands])
     .after_help(ENV_VARIABLES_HELP)
-    .long_about("A secure runtime for JavaScript and TypeScript built with V8, Rust, and Tokio.
+    .long_about("A secure JavaScript and TypeScript runtime
 
 Docs: https://deno.land/manual.html
 Modules: https://deno.land/x/
@@ -148,7 +141,7 @@ To run the REPL:
 
 To execute a sandboxed script:
 
-  deno https://deno.land/welcome.ts
+  deno https://deno.land/std/examples/welcome.ts
 
 To evaluate code from the command line:
 
@@ -194,7 +187,7 @@ To get help on the another subcommands (run in this case):
         .short("c")
         .long("config")
         .value_name("FILE")
-        .help("Load compiler configuration file")
+        .help("Load tsconfig.json configuration file")
         .takes_value(true)
         .global(true),
     )
@@ -229,6 +222,18 @@ Examples: https://github.com/WICG/import-maps#the-import-map",
         })
         .global(true),
     ).arg(
+      Arg::with_name("lock")
+        .long("lock")
+        .value_name("FILE")
+        .help("Check the specified lock file")
+        .takes_value(true)
+        .global(true),
+    ).arg(
+      Arg::with_name("lock-write")
+        .long("lock-write")
+        .help("Write lock file. Use with --lock.")
+        .global(true),
+    ).arg(
       Arg::with_name("v8-options")
         .long("v8-options")
         .help("Print V8 command line options")
@@ -253,11 +258,16 @@ compiler.",
       SubCommand::with_name("bundle")
         .about("Bundle module and dependencies into single file")
         .long_about(
-          "Output a single JavaScript file with all dependencies
+          "Output a single JavaScript file with all dependencies.
+
+If a out_file argument is omitted, the output of the bundle will be sent to
+standard out.
 
 Example:
 
-  deno bundle https://deno.land/std/examples/colors.ts"
+  deno bundle https://deno.land/std/examples/colors.ts
+  
+  deno bundle https://deno.land/std/examples/colors.ts colors.bundle.js"
         )
           .arg(Arg::with_name("source_file").takes_value(true).required(true))
           .arg(Arg::with_name("out_file").takes_value(true).required(false)),
@@ -329,12 +339,111 @@ This command has implicit access to all permissions (equivalent to deno run --al
 Automatically downloads Prettier dependencies on first run.
 
   deno fmt myfile1.ts myfile2.ts",
-        ).arg(
+        )
+        .arg(
           Arg::with_name("stdout")
             .long("stdout")
             .help("Output formated code to stdout")
             .takes_value(false),
-        ).arg(
+        )
+        .arg(
+          Arg::with_name("print-width")
+            .long("print-width")
+            .value_name("int")
+            .help("Specify the line length that the printer will wrap on.")
+            .takes_value(true)
+            .require_equals(true)
+        )
+        .arg(
+          Arg::with_name("tab-width")
+            .long("tab-width")
+            .value_name("int")
+            .help("Specify the number of spaces per indentation-level.")
+            .takes_value(true)
+            .require_equals(true)
+        )
+        .arg(
+          Arg::with_name("use-tabs")
+            .long("use-tabs")
+            .help("Indent lines with tabs instead of spaces.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("no-semi")
+            .long("no-semi")
+            .help("Print semicolons at the ends of statements.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("single-quote")
+            .long("single-quote")
+            .help("Use single quotes instead of double quotes.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("quote-props")
+            .long("quote-props")
+            .value_name("as-needed|consistent|preserve")
+            .help("Change when properties in objects are quoted.")
+            .takes_value(true)
+            .possible_values(&["as-needed", "consistent", "preserve"])
+            .require_equals(true)
+        )
+        .arg(
+          Arg::with_name("jsx-single-quote")
+            .long("jsx-single-quote")
+            .help("Use single quotes instead of double quotes in JSX.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("jsx-bracket-same-line")
+            .long("jsx-bracket-same-line")
+            .help(
+              "Put the > of a multi-line JSX element at the end of the last line
+instead of being alone on the next line (does not apply to self closing elements)."
+            )
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("trailing-comma")
+            .long("trailing-comma")
+            .help("Print trailing commas wherever possible when multi-line.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("no-bracket-spacing")
+            .long("no-bracket-spacing")
+            .help("Print spaces between brackets in object literals.")
+            .takes_value(false)
+        )
+        .arg(
+          Arg::with_name("arrow-parens")
+            .long("arrow-parens")
+            .value_name("avoid|always")
+            .help("Include parentheses around a sole arrow function parameter.")
+            .takes_value(true)
+            .possible_values(&["avoid", "always"])
+            .require_equals(true)
+        )
+        .arg(
+          Arg::with_name("prose-wrap")
+            .long("prose-wrap")
+            .value_name("always|never|preserve")
+            .help("How to wrap prose.")
+            .takes_value(true)
+            .possible_values(&["always", "never", "preserve"])
+            .require_equals(true)
+        )
+        .arg(
+          Arg::with_name("end-of-line")
+            .long("end-of-line")
+            .value_name("auto|lf|crlf|cr")
+            .help("Which end of line characters to apply.")
+            .takes_value(true)
+            .possible_values(&["auto", "lf", "crlf", "cr"])
+            .require_equals(true)
+        )
+        .arg(
           Arg::with_name("files")
             .takes_value(true)
             .multiple(true)
@@ -639,6 +748,13 @@ pub fn parse_flags(
       }
     }
   }
+  if matches.is_present("lock") {
+    let lockfile = matches.value_of("lock").unwrap();
+    flags.lock = Some(lockfile.to_string());
+  }
+  if matches.is_present("lock-write") {
+    flags.lock_write = true;
+  }
 
   flags = parse_run_args(flags, matches);
   // flags specific to "run" subcommand
@@ -706,9 +822,6 @@ fn parse_run_args(mut flags: DenoFlags, matches: &ArgMatches) -> DenoFlags {
     flags.allow_read = true;
     flags.allow_write = true;
     flags.allow_hrtime = true;
-  }
-  if matches.is_present("no-prompt") {
-    flags.no_prompts = true;
   }
   if matches.is_present("no-fetch") {
     flags.no_fetch = true;
@@ -783,32 +896,6 @@ pub enum DenoSubcommand {
   Version,
 }
 
-fn get_default_bundle_filename(source_file: &str) -> String {
-  let specifier = ModuleSpecifier::resolve_url_or_path(source_file).unwrap();
-  let path_segments = specifier.as_url().path_segments().unwrap();
-  let file_name = path_segments.filter(|s| !s.is_empty()).last().unwrap();
-  let file_stem = file_name.trim_end_matches(".ts").trim_end_matches(".js");
-  format!("{}.bundle.js", file_stem)
-}
-
-#[test]
-fn test_get_default_bundle_filename() {
-  assert_eq!(get_default_bundle_filename("blah.ts"), "blah.bundle.js");
-  assert_eq!(
-    get_default_bundle_filename("http://example.com/blah.ts"),
-    "blah.bundle.js"
-  );
-  assert_eq!(get_default_bundle_filename("blah.js"), "blah.bundle.js");
-  assert_eq!(
-    get_default_bundle_filename("http://example.com/blah.js"),
-    "blah.bundle.js"
-  );
-  assert_eq!(
-    get_default_bundle_filename("http://zombo.com/stuff/"),
-    "stuff.bundle.js"
-  );
-}
-
 pub fn flags_from_vec(
   args: Vec<String>,
 ) -> (DenoFlags, DenoSubcommand, Vec<String>) {
@@ -825,11 +912,13 @@ pub fn flags_from_vec(
     ("bundle", Some(bundle_match)) => {
       flags.allow_write = true;
       let source_file: &str = bundle_match.value_of("source_file").unwrap();
-      let out_file = bundle_match
-        .value_of("out_file")
-        .map(String::from)
-        .unwrap_or_else(|| get_default_bundle_filename(source_file));
-      argv.extend(vec![source_file.to_string(), out_file.to_string()]);
+      let out_file = bundle_match.value_of("out_file").map(String::from);
+      match out_file {
+        Some(out_file) => {
+          argv.extend(vec![source_file.to_string(), out_file.to_string()])
+        }
+        _ => argv.extend(vec![source_file.to_string()]),
+      }
       DenoSubcommand::Bundle
     }
     ("completions", Some(completions_match)) => {
@@ -874,6 +963,36 @@ pub fn flags_from_vec(
       if !fmt_match.is_present("stdout") {
         // `deno fmt` writes to the files by default
         argv.push("--write".to_string());
+      }
+
+      let prettier_flags = [
+        ["1", "print-width"],
+        ["1", "tab-width"],
+        ["0", "use-tabs"],
+        ["0", "no-semi"],
+        ["0", "single-quote"],
+        ["1", "quote-props"],
+        ["0", "jsx-single-quote"],
+        ["0", "jsx-bracket-same-line"],
+        ["0", "trailing-comma"],
+        ["0", "no-bracket-spacing"],
+        ["1", "arrow-parens"],
+        ["1", "prose-wrap"],
+        ["1", "end-of-line"],
+      ];
+
+      for opt in &prettier_flags {
+        let t = opt[0];
+        let keyword = opt[1];
+
+        if fmt_match.is_present(&keyword) {
+          if t == "0" {
+            argv.push(format!("--{}", keyword));
+          } else {
+            argv.push(format!("--{}", keyword));
+            argv.push(fmt_match.value_of(keyword).unwrap().to_string());
+          }
+        }
       }
 
       DenoSubcommand::Run
@@ -1897,5 +2016,80 @@ mod tests {
     );
     assert_eq!(subcommand, DenoSubcommand::Run);
     assert_eq!(argv, svec!["deno", "script.ts"])
+  }
+
+  #[test]
+  fn test_flags_from_vec_38() {
+    let (flags, subcommand, argv) = flags_from_vec(svec![
+      "deno",
+      "--lock-write",
+      "--lock=lock.json",
+      "script.ts"
+    ]);
+    assert_eq!(
+      flags,
+      DenoFlags {
+        lock_write: true,
+        lock: Some("lock.json".to_string()),
+        ..DenoFlags::default()
+      }
+    );
+    assert_eq!(subcommand, DenoSubcommand::Run);
+    assert_eq!(argv, svec!["deno", "script.ts"])
+  }
+
+  #[test]
+  fn test_flags_from_vec_39() {
+    let (flags, subcommand, argv) = flags_from_vec(svec![
+      "deno",
+      "fmt",
+      "--print-width=100",
+      "--tab-width=4",
+      "--use-tabs",
+      "--no-semi",
+      "--single-quote",
+      "--arrow-parens=always",
+      "--prose-wrap=preserve",
+      "--end-of-line=crlf",
+      "--quote-props=preserve",
+      "--jsx-single-quote",
+      "--jsx-bracket-same-line",
+      "script.ts"
+    ]);
+    assert_eq!(
+      flags,
+      DenoFlags {
+        allow_write: true,
+        allow_read: true,
+        ..DenoFlags::default()
+      }
+    );
+    assert_eq!(subcommand, DenoSubcommand::Run);
+    assert_eq!(
+      argv,
+      svec![
+        "deno",
+        PRETTIER_URL,
+        "script.ts",
+        "--write",
+        "--print-width",
+        "100",
+        "--tab-width",
+        "4",
+        "--use-tabs",
+        "--no-semi",
+        "--single-quote",
+        "--quote-props",
+        "preserve",
+        "--jsx-single-quote",
+        "--jsx-bracket-same-line",
+        "--arrow-parens",
+        "always",
+        "--prose-wrap",
+        "preserve",
+        "--end-of-line",
+        "crlf"
+      ]
+    );
   }
 }

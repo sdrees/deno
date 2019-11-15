@@ -6,6 +6,56 @@ https://github.com/denoland/deno/releases
 We also have one-line install commands at
 https://github.com/denoland/deno_install
 
+### v0.24.0 / 2019.11.14
+
+- feat: Add Node compat module std/node (#3319)
+- feat: Add permissions.request (#3296)
+- feat: Add prettier flags to deno fmt (#3314)
+- feat: Allow http server to take { hostname, port } argument (#3233)
+- feat: Make bundles fully standalone (#3325)
+- feat: Support .wasm via imports (#3328)
+- fix: Check for closing status when iterating Listener (#3309)
+- fix: Error handling in std/fs/walk() (#3318)
+- fix: Exclude prebuilt from deno_src release (#3272)
+- fix: Turn on TS strict mode for deno_typescript (#3330)
+- fix: URL parse bug (#3316)
+- refactor: resources and workers (#3285, #3271, #3274, #3342, #3290)
+- upgrade: Prettier 1.19 (#3275, #3305)
+- upgrade: Rust deps (#3292)
+- upgrade: TypeScript 3.7 (#3275)
+- upgrade: V8 8.0.192
+
+### v0.23.0 / 2019.11.04
+
+- feat: Add serveTLS and listenAndServeTLS (#3257)
+- feat: Lockfile support (#3231)
+- feat: Adds custom inspect method for URL (#3241)
+- fix: Support for deep `Map` equality with `asserts#equal` (#3236, #3258)
+- fix: Make EOF unique symbol (#3244)
+- fix: Prevent customInspect error from crashing console (#3226)
+
+### v0.22.0 / 2019.10.28
+
+- feat: Deno.listenTLS (#3152)
+- feat: Publish source tarballs for releases (#3203)
+- feat: Support named imports/exports for subset of properties in JSON modules
+  (#3210)
+- feat: Use web standard Permissions API (#3200)
+- feat: Remove --no-prompt flag, fail on missing permissions (#3183)
+- feat: top-level-for-await (#3212)
+- feat: Add ResourceTable in core (#3150)
+- feat: Re-enable standard stream support for fetch bodies (#3192)
+- feat: Add CustomInspect for Headers (#3130)
+- fix: Cherry-pick depot_tools 6a1d778 to fix macOS Cataliona issues (#3175)
+- fix: Remove runtime panics in op dispatch (#3176, #3202, #3131)
+- fix: BufReader.readString to actually return Deno.EOF at end (#3191)
+- perf: faster TextDecoder (#3180, #3204)
+- chore: Reenable std tests that were disabled during merge (#3159)
+- chore: Remove old website (#3194, #3181)
+- chore: Use windows-2019 image in Github Actions (#3198)
+- chore: use v0.21.0 for subcommands (#3168)
+- upgrade: V8 to 7.9.317.12 (#3208)
+
 ### v0.21.0 / 2019.10.19
 
 - feat: --reload flag to take arg for partial reload (#3109)

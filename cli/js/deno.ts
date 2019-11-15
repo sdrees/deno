@@ -68,14 +68,15 @@ export { applySourceMap } from "./error_stack.ts";
 export { ErrorKind, DenoError } from "./errors.ts";
 export {
   permissions,
-  revokePermission,
-  Permission,
+  PermissionName,
+  PermissionState,
+  PermissionStatus,
   Permissions
 } from "./permissions.ts";
 export { truncateSync, truncate } from "./truncate.ts";
 export { FileInfo } from "./file_info.ts";
 export { connect, dial, listen, Listener, Conn } from "./net.ts";
-export { dialTLS } from "./tls.ts";
+export { dialTLS, listenTLS } from "./tls.ts";
 export { metrics, Metrics } from "./metrics.ts";
 export { resources } from "./resources.ts";
 export {
@@ -111,9 +112,3 @@ export let pid: number;
 
 /** Reflects the NO_COLOR environment variable: https://no-color.org/ */
 export let noColor: boolean;
-
-// TODO(ry) This should not be exposed to Deno.
-export function _setGlobals(pid_: number, noColor_: boolean): void {
-  pid = pid_;
-  noColor = noColor_;
-}

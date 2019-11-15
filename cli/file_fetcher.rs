@@ -491,6 +491,7 @@ fn map_file_extension(path: &Path) -> msg::MediaType {
       Some("jsx") => msg::MediaType::JSX,
       Some("mjs") => msg::MediaType::JavaScript,
       Some("json") => msg::MediaType::Json,
+      Some("wasm") => msg::MediaType::Wasm,
       _ => msg::MediaType::Unknown,
     },
   }
@@ -521,7 +522,8 @@ fn map_content_type(path: &Path, content_type: Option<&str>) -> msg::MediaType {
           map_js_like_extension(path, msg::MediaType::JavaScript)
         }
         "application/json" | "text/json" => msg::MediaType::Json,
-        "text/plain" => map_file_extension(path),
+        // Handle plain and possibly webassembly
+        "text/plain" | "application/octet-stream" => map_file_extension(path),
         _ => {
           debug!("unknown content type: {}", content_type);
           msg::MediaType::Unknown
@@ -1504,6 +1506,10 @@ mod tests {
       msg::MediaType::Json
     );
     assert_eq!(
+      map_file_extension(Path::new("foo/bar.wasm")),
+      msg::MediaType::Wasm
+    );
+    assert_eq!(
       map_file_extension(Path::new("foo/bar.txt")),
       msg::MediaType::Unknown
     );
@@ -1543,6 +1549,10 @@ mod tests {
     assert_eq!(
       map_content_type(Path::new("foo/bar.json"), None),
       msg::MediaType::Json
+    );
+    assert_eq!(
+      map_content_type(Path::new("foo/bar.wasm"), None),
+      msg::MediaType::Wasm
     );
     assert_eq!(
       map_content_type(Path::new("foo/bar"), None),
