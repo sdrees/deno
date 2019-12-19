@@ -10,13 +10,18 @@ use crate::state::ThreadSafeState;
 use crate::worker::Worker;
 use deno::*;
 use futures;
-use futures::Async;
-use futures::Future;
-use futures::Sink;
-use futures::Stream;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
+use futures::sink::SinkExt;
+use futures::stream::StreamExt;
 use std;
 use std::convert::From;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
+use std::task::Context;
+use std::task::Poll;
 
 pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
   i.register_op(
@@ -52,13 +57,13 @@ struct GetMessageFuture {
 }
 
 impl Future for GetMessageFuture {
-  type Item = Option<Buf>;
-  type Error = ErrBox;
+  type Output = Option<Buf>;
 
-  fn poll(&mut self) -> Result<Async<Self::Item>, Self::Error> {
-    let mut channels = self.state.worker_channels.lock().unwrap();
+  fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    let inner = self.get_mut();
+    let mut channels = inner.state.worker_channels.lock().unwrap();
     let receiver = &mut channels.receiver;
-    receiver.poll().map_err(ErrBox::from)
+    receiver.poll_next_unpin(cx)
   }
 }
 
@@ -72,17 +77,15 @@ fn op_worker_get_message(
     state: state.clone(),
   };
 
-  let op = op
-    .map_err(move |_| -> ErrBox { unimplemented!() })
-    .and_then(move |maybe_buf| {
-      debug!("op_worker_get_message");
+  let op = op.then(move |maybe_buf| {
+    debug!("op_worker_get_message");
 
-      futures::future::ok(json!({
-        "data": maybe_buf.map(|buf| buf.to_owned())
-      }))
-    });
+    futures::future::ok(json!({
+      "data": maybe_buf.map(|buf| buf.to_owned())
+    }))
+  });
 
-  Ok(JsonOp::Async(Box::new(op)))
+  Ok(JsonOp::Async(op.boxed()))
 }
 
 /// Post message to host as guest worker
@@ -94,9 +97,7 @@ fn op_worker_post_message(
   let d = Vec::from(data.unwrap().as_ref()).into_boxed_slice();
   let mut channels = state.worker_channels.lock().unwrap();
   let sender = &mut channels.sender;
-  sender
-    .send(d)
-    .wait()
+  futures::executor::block_on(sender.send(d))
     .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
 
   Ok(JsonOp::Sync(json!({})))
@@ -141,10 +142,13 @@ fn op_create_worker(
   let (int, ext) = ThreadSafeState::create_channels();
   let child_state = ThreadSafeState::new(
     state.global_state.clone(),
+    Some(parent_state.permissions.clone()), // by default share with parent
     Some(module_specifier.clone()),
     include_deno_namespace,
     int,
   )?;
+  // TODO: add a new option to make child worker not sharing permissions
+  // with parent (aka .clone(), requests from child won't reflect in parent)
   let name = format!("USER-WORKER-{}", specifier);
   let deno_main_call = format!("denoMain({})", include_deno_namespace);
   let mut worker =
@@ -152,23 +156,54 @@ fn op_create_worker(
   js_check(worker.execute(&deno_main_call));
   js_check(worker.execute("workerMain()"));
 
-  let exec_cb = move |worker: Worker| {
-    let worker_id = parent_state.add_child_worker(worker);
-    json!(worker_id)
-  };
+  let worker_id = parent_state.add_child_worker(worker.clone());
+  let response = json!(worker_id);
 
   // Has provided source code, execute immediately.
   if has_source_code {
     js_check(worker.execute(&source_code));
-    return Ok(JsonOp::Sync(exec_cb(worker)));
+    return Ok(JsonOp::Sync(response));
   }
 
-  let op = worker
+  // TODO(bartlomieju): this should spawn mod execution on separate tokio task
+  // and block on receving message on a channel or even use sync channel /shrug
+  let (sender, receiver) = mpsc::sync_channel::<Result<(), ErrBox>>(1);
+  let fut = worker
     .execute_mod_async(&module_specifier, None, false)
-    .and_then(move |()| Ok(exec_cb(worker)));
+    .then(move |result| {
+      sender.send(result).expect("Failed to send message");
+      futures::future::ok(())
+    })
+    .boxed()
+    .compat();
+  tokio::spawn(fut);
 
-  let result = op.wait()?;
-  Ok(JsonOp::Sync(result))
+  let result = receiver.recv().expect("Failed to receive message");
+  result?;
+  Ok(JsonOp::Sync(response))
+}
+
+struct GetWorkerClosedFuture {
+  state: ThreadSafeState,
+  rid: ResourceId,
+}
+
+impl Future for GetWorkerClosedFuture {
+  type Output = Result<(), ErrBox>;
+
+  fn poll(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+    let inner = self.get_mut();
+    let mut workers_table = inner.state.workers.lock().unwrap();
+    let maybe_worker = workers_table.get_mut(&inner.rid);
+    if maybe_worker.is_none() {
+      return Poll::Ready(Ok(()));
+    }
+    match maybe_worker.unwrap().poll_unpin(cx) {
+      Poll::Ready(Err(e)) => Poll::Ready(Err(e)),
+      Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
+      Poll::Pending => Poll::Pending,
+    }
+  }
 }
 
 #[derive(Deserialize)]
@@ -185,18 +220,23 @@ fn op_host_get_worker_closed(
   let args: HostGetWorkerClosedArgs = serde_json::from_value(args)?;
   let id = args.id as u32;
   let state_ = state.clone();
-  let workers_table = state.workers.lock().unwrap();
-  // TODO: handle bad worker id gracefully
-  let worker = workers_table.get(&id).unwrap();
-  let shared_worker_future = worker.clone().shared();
 
-  let op = shared_worker_future.then(move |_result| {
+  let future = GetWorkerClosedFuture {
+    state: state.clone(),
+    rid: id,
+  };
+  let op = future.then(move |_result| {
     let mut workers_table = state_.workers.lock().unwrap();
-    workers_table.remove(&id);
+    let maybe_worker = workers_table.remove(&id);
+    if let Some(worker) = maybe_worker {
+      let mut channels = worker.state.worker_channels.lock().unwrap();
+      channels.sender.close_channel();
+      channels.receiver.close();
+    };
     futures::future::ok(json!({}))
   });
 
-  Ok(JsonOp::Async(Box::new(op)))
+  Ok(JsonOp::Async(op.boxed()))
 }
 
 #[derive(Deserialize)]
@@ -225,7 +265,7 @@ fn op_host_get_message(
       }))
     });
 
-  Ok(JsonOp::Async(Box::new(op)))
+  Ok(JsonOp::Async(op.boxed()))
 }
 
 #[derive(Deserialize)]
@@ -247,9 +287,10 @@ fn op_host_post_message(
   let mut table = state.workers.lock().unwrap();
   // TODO: don't return bad resource anymore
   let worker = table.get_mut(&id).ok_or_else(bad_resource)?;
-  worker
+  let fut = worker
     .post_message(msg)
-    .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()))?;
+    .map_err(|e| DenoError::new(ErrorKind::Other, e.to_string()));
+  futures::executor::block_on(fut)?;
   Ok(JsonOp::Sync(json!({})))
 }
 

@@ -17,13 +17,16 @@ use deno::ModuleSpecifier;
 use deno::Op;
 use deno::PinnedBuf;
 use deno::ResourceTable;
-use futures::Future;
+use futures::channel::mpsc;
+use futures::future::FutureExt;
+use futures::future::TryFutureExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde_json::Value;
 use std;
 use std::collections::HashMap;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::str;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -31,7 +34,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::time::Instant;
-use tokio::sync::mpsc;
 
 /// Isolate cannot be passed between threads but ThreadSafeState can.
 /// ThreadSafeState satisfies Send and Sync. So any state that needs to be
@@ -42,7 +44,7 @@ pub struct ThreadSafeState(Arc<State>);
 pub struct State {
   pub global_state: ThreadSafeGlobalState,
   pub modules: Arc<Mutex<deno::Modules>>,
-  pub permissions: DenoPermissions,
+  pub permissions: Arc<Mutex<DenoPermissions>>,
   pub main_module: Option<ModuleSpecifier>,
   pub worker_channels: Mutex<WorkerChannels>,
   /// When flags contains a `.import_map_path` option, the content of the
@@ -101,11 +103,11 @@ impl ThreadSafeState {
         }
         Op::Async(fut) => {
           let state = state.clone();
-          let result_fut = Box::new(fut.map(move |buf: Buf| {
+          let result_fut = fut.map_ok(move |buf: Buf| {
             state.clone().metrics_op_completed(buf.len());
             buf
-          }));
-          Op::Async(result_fut)
+          });
+          Op::Async(result_fut.boxed())
         }
       }
     }
@@ -115,13 +117,13 @@ impl ThreadSafeState {
   pub fn stateful_minimal_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(i32, Option<PinnedBuf>) -> Box<MinimalOp>
+  ) -> impl Fn(i32, Option<PinnedBuf>) -> Pin<Box<MinimalOp>>
   where
-    D: Fn(&ThreadSafeState, i32, Option<PinnedBuf>) -> Box<MinimalOp>,
+    D: Fn(&ThreadSafeState, i32, Option<PinnedBuf>) -> Pin<Box<MinimalOp>>,
   {
     let state = self.clone();
 
-    move |rid: i32, zero_copy: Option<PinnedBuf>| -> Box<MinimalOp> {
+    move |rid: i32, zero_copy: Option<PinnedBuf>| -> Pin<Box<MinimalOp>> {
       dispatcher(&state, rid, zero_copy)
     }
   }
@@ -176,13 +178,14 @@ impl Loader for ThreadSafeState {
   fn load(
     &self,
     module_specifier: &ModuleSpecifier,
-  ) -> Box<deno::SourceCodeInfoFuture> {
+    maybe_referrer: Option<ModuleSpecifier>,
+  ) -> Pin<Box<deno::SourceCodeInfoFuture>> {
     self.metrics.resolve_count.fetch_add(1, Ordering::SeqCst);
     let module_url_specified = module_specifier.to_string();
     let fut = self
       .global_state
-      .fetch_compiled_module(module_specifier)
-      .map(|compiled_module| deno::SourceCodeInfo {
+      .fetch_compiled_module(module_specifier, maybe_referrer)
+      .map_ok(|compiled_module| deno::SourceCodeInfo {
         // Real module name, might be different from initial specifier
         // due to redirections.
         code: compiled_module.code,
@@ -190,7 +193,7 @@ impl Loader for ThreadSafeState {
         module_url_found: compiled_module.name,
       });
 
-    Box::new(fut)
+    fut.boxed()
   }
 }
 
@@ -211,6 +214,8 @@ impl ThreadSafeState {
 
   pub fn new(
     global_state: ThreadSafeGlobalState,
+    // If Some(perm), use perm. Else copy from global_state.
+    shared_permissions: Option<Arc<Mutex<DenoPermissions>>>,
     main_module: Option<ModuleSpecifier>,
     include_deno_namespace: bool,
     internal_channels: WorkerChannels,
@@ -227,7 +232,11 @@ impl ThreadSafeState {
     };
 
     let modules = Arc::new(Mutex::new(deno::Modules::new()));
-    let permissions = global_state.permissions.clone();
+    let permissions = if let Some(perm) = shared_permissions {
+      perm
+    } else {
+      Arc::new(Mutex::new(global_state.permissions.clone()))
+    };
 
     let state = State {
       global_state,
@@ -258,32 +267,37 @@ impl ThreadSafeState {
 
   #[inline]
   pub fn check_read(&self, filename: &str) -> Result<(), ErrBox> {
-    self.permissions.check_read(filename)
+    self.permissions.lock().unwrap().check_read(filename)
   }
 
   #[inline]
   pub fn check_write(&self, filename: &str) -> Result<(), ErrBox> {
-    self.permissions.check_write(filename)
+    self.permissions.lock().unwrap().check_write(filename)
   }
 
   #[inline]
   pub fn check_env(&self) -> Result<(), ErrBox> {
-    self.permissions.check_env()
+    self.permissions.lock().unwrap().check_env()
   }
 
   #[inline]
   pub fn check_net(&self, hostname: &str, port: u16) -> Result<(), ErrBox> {
-    self.permissions.check_net(hostname, port)
+    self.permissions.lock().unwrap().check_net(hostname, port)
   }
 
   #[inline]
   pub fn check_net_url(&self, url: &url::Url) -> Result<(), ErrBox> {
-    self.permissions.check_net_url(url)
+    self.permissions.lock().unwrap().check_net_url(url)
   }
 
   #[inline]
   pub fn check_run(&self) -> Result<(), ErrBox> {
-    self.permissions.check_run()
+    self.permissions.lock().unwrap().check_run()
+  }
+
+  #[inline]
+  pub fn check_plugin(&self, filename: &str) -> Result<(), ErrBox> {
+    self.permissions.lock().unwrap().check_plugin(filename)
   }
 
   pub fn check_dyn_import(
@@ -325,6 +339,7 @@ impl ThreadSafeState {
 
     ThreadSafeState::new(
       ThreadSafeGlobalState::mock(argv),
+      None,
       module_specifier,
       true,
       internal_channels,

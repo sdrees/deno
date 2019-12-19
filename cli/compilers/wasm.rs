@@ -7,11 +7,12 @@ use crate::startup_data;
 use crate::state::*;
 use crate::worker::Worker;
 use deno::Buf;
-use futures::Future;
-use futures::IntoFuture;
+use futures::FutureExt;
+use futures::TryFutureExt;
 use serde_derive::Deserialize;
 use serde_json;
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use url::Url;
@@ -46,7 +47,7 @@ impl WasmCompiler {
   fn setup_worker(global_state: ThreadSafeGlobalState) -> Worker {
     let (int, ext) = ThreadSafeState::create_channels();
     let worker_state =
-      ThreadSafeState::new(global_state.clone(), None, true, int)
+      ThreadSafeState::new(global_state.clone(), None, None, true, int)
         .expect("Unable to create worker state");
 
     // Count how many times we start the compiler worker.
@@ -71,11 +72,11 @@ impl WasmCompiler {
     self: &Self,
     global_state: ThreadSafeGlobalState,
     source_file: &SourceFile,
-  ) -> Box<CompiledModuleFuture> {
+  ) -> Pin<Box<CompiledModuleFuture>> {
     let cache = self.cache.clone();
     let maybe_cached = { cache.lock().unwrap().get(&source_file.url).cloned() };
     if let Some(m) = maybe_cached {
-      return Box::new(futures::future::ok(m.clone()));
+      return futures::future::ok(m.clone()).boxed();
     }
     let cache_ = self.cache.clone();
 
@@ -92,8 +93,7 @@ impl WasmCompiler {
           .into_boxed_str()
           .into_boxed_bytes(),
       )
-      .into_future()
-      .then(move |_| worker)
+      .then(|_| worker)
       .then(move |result| {
         if let Err(err) = result {
           // TODO(ry) Need to forward the error instead of exiting.
@@ -124,9 +124,9 @@ impl WasmCompiler {
           cache_.lock().unwrap().insert(url.clone(), module.clone());
         }
         debug!("<<<<< wasm_compile_async END");
-        Ok(module)
+        futures::future::ok(module)
       });
-    Box::new(fut)
+    fut.boxed()
   }
 }
 
