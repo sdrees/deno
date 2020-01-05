@@ -103,11 +103,6 @@ fn repl_test() {
 }
 
 #[test]
-fn setup_test() {
-  util::run_python_script("tools/setup_test.py")
-}
-
-#[test]
 fn target_test() {
   util::run_python_script("tools/target_test.py")
 }
@@ -685,8 +680,8 @@ itest!(top_level_for_await_ts {
 });
 
 mod util {
-  use deno_cli::colors::strip_ansi_codes;
-  pub use deno_cli::test_util::*;
+  use deno::colors::strip_ansi_codes;
+  pub use deno::test_util::*;
   use os_pipe::pipe;
   use std::io::Read;
   use std::io::Write;
