@@ -1,4 +1,6 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+#![deny(warnings)]
+
 #[macro_use]
 extern crate log;
 extern crate futures;
@@ -10,6 +12,7 @@ extern crate rusty_v8;
 extern crate lazy_static;
 
 mod any_error;
+mod bindings;
 mod flags;
 mod isolate;
 mod js_errors;
