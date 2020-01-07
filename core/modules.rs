@@ -7,12 +7,12 @@
 // synchronously. The isolate.rs module should never depend on this module.
 
 use crate::any_error::ErrBox;
-use crate::isolate::ImportStream;
-use crate::isolate::Isolate;
-use crate::isolate::RecursiveLoadEvent as Event;
-use crate::isolate::SourceCodeInfo;
-use crate::libdeno::deno_dyn_import_id;
-use crate::libdeno::deno_mod;
+use crate::es_isolate::DynImportId;
+use crate::es_isolate::EsIsolate;
+use crate::es_isolate::ImportStream;
+use crate::es_isolate::ModuleId;
+use crate::es_isolate::RecursiveLoadEvent as Event;
+use crate::es_isolate::SourceCodeInfo;
 use crate::module_specifier::ModuleSpecifier;
 use futures::future::FutureExt;
 use futures::stream::FuturesUnordered;
@@ -55,7 +55,7 @@ pub trait Loader: Send + Sync {
 #[derive(Debug, Eq, PartialEq)]
 enum Kind {
   Main,
-  DynamicImport(deno_dyn_import_id),
+  DynamicImport(DynImportId),
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -63,8 +63,8 @@ enum State {
   ResolveMain(String, Option<String>), // specifier, maybe code
   ResolveImport(String, String),       // specifier, referrer
   LoadingRoot,
-  LoadingImports(deno_mod),
-  Instantiated(deno_mod),
+  LoadingImports(ModuleId),
+  Instantiated(ModuleId),
 }
 
 /// This future is used to implement parallel async module loading without
@@ -93,7 +93,7 @@ impl<L: Loader + Unpin> RecursiveLoad<L> {
   }
 
   pub fn dynamic_import(
-    id: deno_dyn_import_id,
+    id: DynImportId,
     specifier: &str,
     referrer: &str,
     loader: L,
@@ -104,7 +104,7 @@ impl<L: Loader + Unpin> RecursiveLoad<L> {
     Self::new(kind, state, loader, modules)
   }
 
-  pub fn dyn_import_id(&self) -> Option<deno_dyn_import_id> {
+  pub fn dyn_import_id(&self) -> Option<DynImportId> {
     match self.kind {
       Kind::Main => None,
       Kind::DynamicImport(id) => Some(id),
@@ -165,7 +165,7 @@ impl<L: Loader + Unpin> RecursiveLoad<L> {
     &mut self,
     specifier: &str,
     referrer: &str,
-    parent_id: deno_mod,
+    parent_id: ModuleId,
   ) -> Result<(), ErrBox> {
     let referrer_specifier = ModuleSpecifier::resolve_url(referrer)
       .expect("Referrer should be a valid specifier");
@@ -198,8 +198,8 @@ impl<L: Loader + Unpin> RecursiveLoad<L> {
   /// This future needs to take ownership of the isolate.
   pub fn get_future(
     self,
-    isolate: Arc<Mutex<Box<Isolate>>>,
-  ) -> impl Future<Output = Result<deno_mod, ErrBox>> {
+    isolate: Arc<Mutex<Box<EsIsolate>>>,
+  ) -> impl Future<Output = Result<ModuleId, ErrBox>> {
     async move {
       let mut load = self;
       loop {
@@ -221,7 +221,7 @@ impl<L: Loader + Unpin> ImportStream for RecursiveLoad<L> {
   fn register(
     &mut self,
     source_code_info: SourceCodeInfo,
-    isolate: &mut Isolate,
+    isolate: &mut EsIsolate,
   ) -> Result<(), ErrBox> {
     // #A There are 3 cases to handle at this moment:
     // 1. Source code resolved result have the same module name as requested
@@ -287,7 +287,7 @@ impl<L: Loader + Unpin> ImportStream for RecursiveLoad<L> {
       };
 
       let mut resolve_cb =
-        |specifier: &str, referrer_id: deno_mod| -> deno_mod {
+        |specifier: &str, referrer_id: ModuleId| -> ModuleId {
           let modules = self.modules.lock().unwrap();
           let referrer = modules.get_name(referrer_id).unwrap();
           match self.loader.resolve(
@@ -376,7 +376,7 @@ enum SymbolicModule {
   /// the same underlying module (particularly due to redirects).
   Alias(String),
   /// This module associates with a V8 module by id.
-  Mod(deno_mod),
+  Mod(ModuleId),
 }
 
 #[derive(Default)]
@@ -395,7 +395,7 @@ impl ModuleNameMap {
   /// Get the id of a module.
   /// If this module is internally represented as an alias,
   /// follow the alias chain to get the final module id.
-  pub fn get(&self, name: &str) -> Option<deno_mod> {
+  pub fn get(&self, name: &str) -> Option<ModuleId> {
     let mut mod_name = name;
     loop {
       let cond = self.inner.get(mod_name);
@@ -414,7 +414,7 @@ impl ModuleNameMap {
   }
 
   /// Insert a name assocated module id.
-  pub fn insert(&mut self, name: String, id: deno_mod) {
+  pub fn insert(&mut self, name: String, id: ModuleId) {
     self.inner.insert(name, SymbolicModule::Mod(id));
   }
 
@@ -436,7 +436,7 @@ impl ModuleNameMap {
 /// A collection of JS modules.
 #[derive(Default)]
 pub struct Modules {
-  info: HashMap<deno_mod, ModuleInfo>,
+  info: HashMap<ModuleId, ModuleInfo>,
   by_name: ModuleNameMap,
 }
 
@@ -448,11 +448,11 @@ impl Modules {
     }
   }
 
-  pub fn get_id(&self, name: &str) -> Option<deno_mod> {
+  pub fn get_id(&self, name: &str) -> Option<ModuleId> {
     self.by_name.get(name)
   }
 
-  pub fn get_children(&self, id: deno_mod) -> Option<&Vec<String>> {
+  pub fn get_children(&self, id: ModuleId) -> Option<&Vec<String>> {
     self.info.get(&id).map(|i| &i.children)
   }
 
@@ -460,7 +460,7 @@ impl Modules {
     self.get_id(name).and_then(|id| self.get_children(id))
   }
 
-  pub fn get_name(&self, id: deno_mod) -> Option<&String> {
+  pub fn get_name(&self, id: ModuleId) -> Option<&String> {
     self.info.get(&id).map(|i| &i.name)
   }
 
@@ -468,7 +468,7 @@ impl Modules {
     self.by_name.get(name).is_some()
   }
 
-  pub fn add_child(&mut self, parent_id: deno_mod, child_name: &str) -> bool {
+  pub fn add_child(&mut self, parent_id: ModuleId, child_name: &str) -> bool {
     self
       .info
       .get_mut(&parent_id)
@@ -480,7 +480,7 @@ impl Modules {
       .is_some()
   }
 
-  pub fn register(&mut self, id: deno_mod, name: &str) {
+  pub fn register(&mut self, id: ModuleId, name: &str) {
     let name = String::from(name);
     debug!("register_complete {}", name);
 
@@ -609,8 +609,8 @@ impl fmt::Display for Deps {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::es_isolate::tests::*;
   use crate::isolate::js_check;
-  use crate::isolate::tests::*;
   use futures::future::FutureExt;
   use futures::stream::StreamExt;
   use std::error::Error;
@@ -619,14 +619,14 @@ mod tests {
 
   struct MockLoader {
     pub loads: Arc<Mutex<Vec<String>>>,
-    pub isolate: Arc<Mutex<Box<Isolate>>>,
+    pub isolate: Arc<Mutex<Box<EsIsolate>>>,
     pub modules: Arc<Mutex<Modules>>,
   }
 
   impl MockLoader {
     fn new() -> Self {
       let modules = Modules::new();
-      let (isolate, _dispatch_count) = setup(Mode::Async);
+      let (isolate, _dispatch_count) = setup();
       Self {
         loads: Arc::new(Mutex::new(Vec::new())),
         isolate: Arc::new(Mutex::new(isolate)),
