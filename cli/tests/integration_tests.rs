@@ -253,31 +253,13 @@ itest!(_027_redirect_typescript {
 });
 
 itest!(_028_args {
-  args: "run --reload 028_args.ts --arg1 val1 --arg2=val2 -- arg3 arg4",
+  args: "run --reload 028_args.ts -- --arg1 val1 --arg2=val2 -- arg3 arg4",
   output: "028_args.ts.out",
 });
 
 itest!(_029_eval {
   args: "eval console.log(\"hello\")",
   output: "029_eval.out",
-});
-
-itest!(_030_xeval {
-  args: "xeval console.log($.toUpperCase())",
-  input: Some("a\nb\n\nc"),
-  output: "030_xeval.out",
-});
-
-itest!(_031_xeval_replvar {
-  args: "xeval -I val console.log(val.toUpperCase());",
-  input: Some("a\nb\n\nc"),
-  output: "031_xeval_replvar.out",
-});
-
-itest!(_032_xeval_delim {
-  args: "xeval -d DELIM console.log($.toUpperCase());",
-  input: Some("aDELIMbDELIMDELIMc"),
-  output: "032_xeval_delim.out",
 });
 
 itest!(_033_import_map {
