@@ -1307,8 +1307,8 @@ declare namespace Deno {
 
   interface Addr {
     transport: Transport;
-    /** UNSTABLE: Address is unstable because inconsistent with DialOptions. */
-    address: string;
+    hostname: string;
+    port: number;
   }
 
   /** UNSTABLE: Maybe remove ShutdownMode entirely. */
@@ -1342,21 +1342,19 @@ declare namespace Deno {
      */
     close(): void;
     /** Return the address of the `Listener`. */
-    addr(): Addr;
+    addr: Addr;
     [Symbol.asyncIterator](): AsyncIterator<Conn>;
   }
 
   export interface Conn extends Reader, Writer, Closer {
-    /** UNSTABLE: return Addr?
-     *
+    /**
      * The local address of the connection.
      */
-    localAddr: string;
-    /** UNSTABLE: return Addr?
-     *
+    localAddr: Addr;
+    /**
      * The remote address of the connection.
      */
-    remoteAddr: string;
+    remoteAddr: Addr;
     /** The resource ID of the connection. */
     rid: number;
     /** Shuts down (`shutdown(2)`) the reading side of the TCP connection. Most
@@ -1419,16 +1417,14 @@ declare namespace Deno {
    */
   export function listenTLS(options: ListenTLSOptions): Listener;
 
-  /** UNSTABLE rename to ConnectOptions */
-  export interface DialOptions {
+  export interface ConnectOptions {
     port: number;
     hostname?: string;
     transport?: Transport;
   }
 
-  /** UNSTABLE: Rename to connect.
-   *
-   * Dial connects to the address on the named transport.
+  /**
+   * Connects to the address on the named transport.
    *
    * @param options
    * @param options.port The port to connect to. (Required.)
@@ -1440,25 +1436,23 @@ declare namespace Deno {
    *
    * Examples:
    *
-   *     dial({ port: 80 })
-   *     dial({ hostname: "192.0.2.1", port: 80 })
-   *     dial({ hostname: "[2001:db8::1]", port: 80 });
-   *     dial({ hostname: "golang.org", port: 80, transport: "tcp" })
+   *     connect({ port: 80 })
+   *     connect({ hostname: "192.0.2.1", port: 80 })
+   *     connect({ hostname: "[2001:db8::1]", port: 80 });
+   *     connect({ hostname: "golang.org", port: 80, transport: "tcp" })
    */
-  export function dial(options: DialOptions): Promise<Conn>;
+  export function connect(options: ConnectOptions): Promise<Conn>;
 
-  /** UNSTABLE: rename to ConnectTLSOptions */
-  export interface DialTLSOptions {
+  export interface ConnectTLSOptions {
     port: number;
     hostname?: string;
     certFile?: string;
   }
 
-  /** UNSTABLE: rename to connectTLS.
-   *
-   * dialTLS establishes a secure connection over TLS (transport layer security).
+  /**
+   * Establishes a secure connection over TLS (transport layer security).
    */
-  export function dialTLS(options: DialTLSOptions): Promise<Conn>;
+  export function connectTLS(options: ConnectTLSOptions): Promise<Conn>;
 
   /** UNSTABLE: not sure if broken or not */
   export interface Metrics {

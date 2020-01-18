@@ -36,7 +36,10 @@ use webpki::DNSNameRef;
 use webpki_roots;
 
 pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
-  i.register_op("dial_tls", s.core_op(json_op(s.stateful_op(op_dial_tls))));
+  i.register_op(
+    "connect_tls",
+    s.core_op(json_op(s.stateful_op(op_connect_tls))),
+  );
   i.register_op(
     "listen_tls",
     s.core_op(json_op(s.stateful_op(op_listen_tls))),
@@ -49,18 +52,19 @@ pub fn init(i: &mut Isolate, s: &ThreadSafeState) {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DialTLSArgs {
+struct ConnectTLSArgs {
+  transport: String,
   hostname: String,
   port: u16,
   cert_file: Option<String>,
 }
 
-pub fn op_dial_tls(
+pub fn op_connect_tls(
   state: &ThreadSafeState,
   args: Value,
   _zero_copy: Option<PinnedBuf>,
 ) -> Result<JsonOp, ErrBox> {
-  let args: DialTLSArgs = serde_json::from_value(args)?;
+  let args: ConnectTLSArgs = serde_json::from_value(args)?;
   let cert_file = args.cert_file.clone();
   let state_ = state.clone();
   state.check_net(&args.hostname, args.port)?;
@@ -98,8 +102,16 @@ pub fn op_dial_tls(
     );
     Ok(json!({
         "rid": rid,
-        "localAddr": local_addr.to_string(),
-        "remoteAddr": remote_addr.to_string(),
+        "localAddr": {
+          "hostname": local_addr.ip().to_string(),
+          "port": local_addr.port(),
+          "transport": args.transport,
+        },
+        "remoteAddr": {
+          "hostname": remote_addr.ip().to_string(),
+          "port": remote_addr.port(),
+          "transport": args.transport,
+        }
     }))
   };
 
@@ -254,7 +266,6 @@ fn op_listen_tls(
     futures::executor::block_on(resolve_addr(&args.hostname, args.port))?;
   let listener = futures::executor::block_on(TcpListener::bind(&addr))?;
   let local_addr = listener.local_addr()?;
-  let local_addr_str = local_addr.to_string();
   let tls_listener_resource = TlsListenerResource {
     listener,
     tls_acceptor,
@@ -266,7 +277,11 @@ fn op_listen_tls(
 
   Ok(JsonOp::Sync(json!({
     "rid": rid,
-    "localAddr": local_addr_str
+    "localAddr": {
+      "hostname": local_addr.ip().to_string(),
+      "port": local_addr.port(),
+      "transport": args.transport,
+    },
   })))
 }
 
@@ -368,8 +383,16 @@ fn op_accept_tls(
     };
     Ok(json!({
       "rid": rid,
-      "localAddr": local_addr.to_string(),
-      "remoteAddr": remote_addr.to_string(),
+      "localAddr": {
+        "transport": "tcp",
+        "hostname": local_addr.ip().to_string(),
+        "port": local_addr.port()
+      },
+      "remoteAddr": {
+        "transport": "tcp",
+        "hostname": remote_addr.ip().to_string(),
+        "port": remote_addr.port()
+      }
     }))
   };
 
