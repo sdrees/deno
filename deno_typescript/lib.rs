@@ -16,6 +16,7 @@ use deno_core::PinnedBuf;
 use deno_core::StartupData;
 pub use ops::EmitResult;
 use ops::WrittenFile;
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -37,6 +38,7 @@ pub struct TSState {
   bundle: bool,
   exit_code: i32,
   emit_result: Option<EmitResult>,
+  custom_assets: HashMap<String, PathBuf>,
   /// A list of files emitted by typescript. WrittenFile is tuple of the form
   /// (url, corresponding_module, source_code)
   written_files: Vec<WrittenFile>,
@@ -76,6 +78,7 @@ impl TSIsolate {
 
     let state = Arc::new(Mutex::new(TSState {
       bundle,
+      custom_assets: HashMap::new(),
       exit_code: 0,
       emit_result: None,
       written_files: Vec::new(),
@@ -119,13 +122,24 @@ impl TSIsolate {
     self.isolate.execute("<anon>", source)?;
     Ok(self.state)
   }
+
+  pub fn add_custom_assets(&mut self, custom_assets: Vec<(String, PathBuf)>) {
+    let mut state = self.state.lock().unwrap();
+    for (name, path) in custom_assets {
+      state.custom_assets.insert(name, path);
+    }
+  }
 }
 
 pub fn compile_bundle(
   bundle: &Path,
   root_names: Vec<PathBuf>,
+  custom_assets: Option<Vec<(String, PathBuf)>>,
 ) -> Result<Arc<Mutex<TSState>>, ErrBox> {
-  let ts_isolate = TSIsolate::new(true);
+  let mut ts_isolate = TSIsolate::new(true);
+  if let Some(assets) = custom_assets {
+    ts_isolate.add_custom_assets(assets);
+  }
 
   let config_json = serde_json::json!({
     "compilerOptions": {
@@ -146,7 +160,7 @@ pub fn compile_bundle(
     },
   });
 
-  let mut root_names_str: Vec<String> = root_names
+  let root_names_str: Vec<String> = root_names
     .iter()
     .map(|p| {
       if !p.exists() {
@@ -158,7 +172,6 @@ pub fn compile_bundle(
       module_specifier.as_str().to_string()
     })
     .collect();
-  root_names_str.push("$asset$/lib.deno_core.d.ts".to_string());
 
   // TODO lift js_check to caller?
   let state = js_check(ts_isolate.compile(&config_json, root_names_str));
@@ -242,7 +255,7 @@ fn write_snapshot(
 }
 
 /// Same as get_asset() but returns NotFound intead of None.
-pub fn get_asset2(name: &str) -> Result<String, ErrBox> {
+pub fn get_asset2(name: &str) -> Result<&'static str, ErrBox> {
   match get_asset(name) {
     Some(a) => Ok(a),
     None => Err(
@@ -252,26 +265,15 @@ pub fn get_asset2(name: &str) -> Result<String, ErrBox> {
   }
 }
 
-fn read_file(name: &str) -> String {
-  fs::read_to_string(name).unwrap()
-}
-
-macro_rules! inc {
-  ($e:expr) => {
-    Some(read_file(concat!("../deno_typescript/typescript/lib/", $e)))
-  };
-}
-
-pub fn get_asset(name: &str) -> Option<String> {
+pub fn get_asset(name: &str) -> Option<&'static str> {
+  macro_rules! inc {
+    ($e:expr) => {
+      Some(include_str!(concat!("typescript/lib/", $e)))
+    };
+  }
   match name {
-    "bundle_loader.js" => {
-      Some(read_file("../deno_typescript/bundle_loader.js"))
-    }
-    "lib.deno_core.d.ts" => {
-      Some(read_file("../deno_typescript/lib.deno_core.d.ts"))
-    }
-    "lib.deno_runtime.d.ts" => Some(read_file("js/lib.deno_runtime.d.ts")),
-    "bootstrap.ts" => Some("console.log(\"hello deno\");".to_string()),
+    "bundle_loader.js" => Some(include_str!("bundle_loader.js")),
+    "bootstrap.ts" => Some("console.log(\"hello deno\");"),
     "typescript.d.ts" => inc!("typescript.d.ts"),
     "lib.esnext.d.ts" => inc!("lib.esnext.d.ts"),
     "lib.es2020.d.ts" => inc!("lib.es2020.d.ts"),

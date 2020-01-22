@@ -7,13 +7,12 @@ import { args } from "./deno.ts";
 import { setPrepareStackTrace } from "./error_stack.ts";
 import { replLoop } from "./repl.ts";
 import { setVersions } from "./version.ts";
-import { window } from "./window.ts";
 import { setLocation } from "./location.ts";
 import { setBuildInfo } from "./build.ts";
 import { setSignals } from "./process.ts";
 
-function denoMain(preserveDenoNamespace = true, name?: string): void {
-  const s = os.start(preserveDenoNamespace, name);
+function bootstrapMainRuntime(): void {
+  const s = os.start(true);
 
   setBuildInfo(s.os, s.arch);
   setSignals();
@@ -36,4 +35,4 @@ function denoMain(preserveDenoNamespace = true, name?: string): void {
     replLoop();
   }
 }
-window["denoMain"] = denoMain;
+globalThis["bootstrapMainRuntime"] = bootstrapMainRuntime;

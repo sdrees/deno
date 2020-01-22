@@ -312,7 +312,16 @@ declare namespace Deno {
   /** Open a file and return an instance of the `File` object
    *  synchronously.
    *
-   *       const file = Deno.openSync("/foo/bar.txt");
+   *       const file = Deno.openSYNC("/foo/bar.txt", { read: true, write: true });
+   *
+   * Requires allow-read or allow-write or both depending on mode.
+   */
+  export function openSync(filename: string, options?: OpenOptions): File;
+
+  /** Open a file and return an instance of the `File` object
+   *  synchronously.
+   *
+   *       const file = Deno.openSync("/foo/bar.txt", "r");
    *
    * Requires allow-read or allow-write or both depending on mode.
    */
@@ -320,7 +329,15 @@ declare namespace Deno {
 
   /** Open a file and return an instance of the `File` object.
    *
-   *       const file = await Deno.open("/foo/bar.txt");
+   *     const file = await Deno.open("/foo/bar.txt", { read: true, write: true });
+   *
+   * Requires allow-read or allow-write or both depending on mode.
+   */
+  export function open(filename: string, options?: OpenOptions): Promise<File>;
+
+  /** Open a file and return an instance of the `File` object.
+   *
+   *     const file = await Deno.open("/foo/bar.txt, "w+");
    *
    * Requires allow-read or allow-write or both depending on mode.
    */
@@ -439,8 +456,38 @@ declare namespace Deno {
   /** An instance of `File` for stderr. */
   export const stderr: File;
 
-  /** UNSTABLE: merge https://github.com/denoland/deno/pull/3119 */
+  export interface OpenOptions {
+    /** Sets the option for read access. This option, when true, will indicate that the file should be read-able if opened. */
+    read?: boolean;
+    /** Sets the option for write access.
+     * This option, when true, will indicate that the file should be write-able if opened.
+     * If the file already exists, any write calls on it will overwrite its contents, without truncating it.
+     */
+    write?: boolean;
+    /* Sets the option for creating a new file.
+     * This option indicates whether a new file will be created if the file does not yet already exist.
+     * In order for the file to be created, write or append access must be used.
+     */
+    create?: boolean;
+    /** Sets the option for truncating a previous file.
+     * If a file is successfully opened with this option set it will truncate the file to 0 length if it already exists.
+     * The file must be opened with write access for truncate to work.
+     */
+    truncate?: boolean;
+    /**Sets the option for the append mode.
+     * This option, when true, means that writes will append to a file instead of overwriting previous contents.
+     * Note that setting { write: true, append: true } has the same effect as setting only { append: true }.
+     */
+    append?: boolean;
+    /** Sets the option to always create a new file.
+     * This option indicates whether a new file will be created. No file is allowed to exist at the target location, also no (dangling) symlink.
+     * If { createNew: true } is set, create and truncate are ignored.
+     */
+    createNew?: boolean;
+  }
+
   export type OpenMode =
+    /** Read-only. Default. Starts at beginning of file. */
     | "r"
     /** Read-write. Start at beginning of file. */
     | "r+"
@@ -1114,9 +1161,9 @@ declare namespace Deno {
    *       } catch (e) {
    *         if (
    *           e instanceof Deno.DenoError &&
-   *           e.kind === Deno.ErrorKind.Overflow
+   *           e.kind === Deno.ErrorKind.NotFound
    *         ) {
-   *           console.error("Overflow error!");
+   *           console.error("NotFound error!");
    *         }
    *       }
    *
@@ -1126,7 +1173,6 @@ declare namespace Deno {
     constructor(kind: T, msg: string);
   }
   export enum ErrorKind {
-    NoError = 0,
     NotFound = 1,
     PermissionDenied = 2,
     ConnectionRefused = 3,
@@ -1146,37 +1192,15 @@ declare namespace Deno {
     Other = 17,
     UnexpectedEof = 18,
     BadResource = 19,
-    CommandFailed = 20,
-    EmptyHost = 21,
-    IdnaError = 22,
-    InvalidPort = 23,
-    InvalidIpv4Address = 24,
-    InvalidIpv6Address = 25,
-    InvalidDomainCharacter = 26,
-    RelativeUrlWithoutBase = 27,
-    RelativeUrlWithCannotBeABaseBase = 28,
-    SetHostOnCannotBeABaseUrl = 29,
-    Overflow = 30,
-    HttpUser = 31,
-    HttpClosed = 32,
-    HttpCanceled = 33,
-    HttpParse = 34,
-    HttpOther = 35,
-    TooLarge = 36,
-    InvalidUri = 37,
-    InvalidSeekMode = 38,
-    OpNotAvailable = 39,
-    WorkerInitFailed = 40,
-    UnixError = 41,
-    NoAsyncSupport = 42,
-    NoSyncSupport = 43,
-    ImportMapError = 44,
-    InvalidPath = 45,
-    ImportPrefixMissing = 46,
-    UnsupportedFetchScheme = 47,
-    TooManyRedirects = 48,
-    Diagnostic = 49,
-    JSError = 50
+    UrlParse = 20,
+    Http = 21,
+    TooLarge = 22,
+    InvalidSeekMode = 23,
+    UnixError = 24,
+    InvalidPath = 25,
+    ImportPrefixMissing = 26,
+    Diagnostic = 27,
+    JSError = 28
   }
 
   /** UNSTABLE: potentially want names to overlap more with browser.
@@ -2151,9 +2175,9 @@ declare interface Window {
   performance: __performanceUtil.Performance;
   onmessage: (e: { data: any }) => void;
   onerror: undefined | typeof onerror;
-  workerMain: typeof __workers.workerMain;
-  workerClose: typeof __workers.workerClose;
-  postMessage: typeof __workers.postMessage;
+  bootstrapWorkerRuntime: typeof __workerMain.bootstrapWorkerRuntime;
+  workerClose: typeof __workerMain.workerClose;
+  postMessage: typeof __workerMain.postMessage;
   Worker: typeof __workers.WorkerImpl;
   addEventListener: (
     type: string,
@@ -2200,11 +2224,19 @@ declare const TextDecoder: typeof __textEncoding.TextDecoder;
 declare const Request: __domTypes.RequestConstructor;
 declare const Response: typeof __fetch.Response;
 declare const performance: __performanceUtil.Performance;
-declare let onmessage: (e: { data: any }) => void;
-declare let onerror: (e: Event) => void;
-declare const workerMain: typeof __workers.workerMain;
-declare const workerClose: typeof __workers.workerClose;
-declare const postMessage: typeof __workers.postMessage;
+declare let onmessage: ((e: { data: any }) => Promise<void> | void) | undefined;
+declare let onerror:
+  | ((
+      msg: string,
+      source: string,
+      lineno: number,
+      colno: number,
+      e: Event
+    ) => boolean | void)
+  | undefined;
+declare const bootstrapWorkerRuntime: typeof __workerMain.bootstrapWorkerRuntime;
+declare const workerClose: typeof __workerMain.workerClose;
+declare const postMessage: typeof __workerMain.postMessage;
 declare const Worker: typeof __workers.WorkerImpl;
 declare const addEventListener: (
   type: string,
@@ -3452,31 +3484,25 @@ declare namespace __url {
   };
 }
 
-declare namespace __workers {
-  // @url js/workers.d.ts
-
-  export function encodeMessage(data: any): Uint8Array;
-  export function decodeMessage(dataIntArray: Uint8Array): any;
+declare namespace __workerMain {
   export let onmessage: (e: { data: any }) => void;
   export function postMessage(data: any): void;
   export function getMessage(): Promise<any>;
   export let isClosing: boolean;
   export function workerClose(): void;
-  export function workerMain(): Promise<void>;
+  export function bootstrapWorkerRuntime(): Promise<void>;
+}
+
+declare namespace __workers {
+  // @url js/workers.d.ts
   export interface Worker {
     onerror?: (e: Event) => void;
     onmessage?: (e: { data: any }) => void;
     onmessageerror?: () => void;
     postMessage(data: any): void;
-    closed: Promise<void>;
   }
-  export interface WorkerOptions {}
-  /** Extended Deno Worker initialization options.
-   * `noDenoNamespace` hides global `window.Deno` namespace for
-   * spawned worker and nested workers spawned by it (default: false).
-   */
-  export interface DenoWorkerOptions extends WorkerOptions {
-    noDenoNamespace?: boolean;
+  export interface WorkerOptions {
+    type?: "classic" | "module";
   }
   export class WorkerImpl implements Worker {
     private readonly id;
@@ -3485,8 +3511,7 @@ declare namespace __workers {
     onerror?: (e: Event) => void;
     onmessage?: (data: any) => void;
     onmessageerror?: () => void;
-    constructor(specifier: string, options?: DenoWorkerOptions);
-    readonly closed: Promise<void>;
+    constructor(specifier: string, options?: WorkerOptions);
     postMessage(data: any): void;
     private run;
   }
