@@ -44,7 +44,7 @@ mod progress;
 mod repl;
 pub mod resolve_addr;
 mod shell;
-mod signal;
+pub mod signal;
 pub mod source_maps;
 mod startup_data;
 pub mod state;
@@ -146,7 +146,7 @@ fn create_worker_and_state(
 }
 
 fn types_command() {
-  println!("{}", crate::js::DENO_RUNTIME);
+  println!("{}\n{}", crate::js::DENO_NS_LIB, crate::js::DENO_MAIN_LIB);
 }
 
 fn print_cache_info(worker: MainWorker) {

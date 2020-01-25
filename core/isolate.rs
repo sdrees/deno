@@ -27,65 +27,58 @@ use std::future::Future;
 use std::ops::{Deref, DerefMut};
 use std::option::Option;
 use std::pin::Pin;
-use std::ptr::NonNull;
-use std::slice;
 use std::sync::{Arc, Mutex, Once};
 use std::task::Context;
 use std::task::Poll;
 
-/// Size of `ArrayBuffer` that will be allocated and shared
-/// between responses. If response is bigger a new one-off
-/// `ArrayBuffer` will be allocated.
-pub const SHARED_RESPONSE_BUF_SIZE: usize = 1024 * 1024;
-
-/// A PinnedBuf encapsulates a slice that's been borrowed from a JavaScript
+/// A ZeroCopyBuf encapsulates a slice that's been borrowed from a JavaScript
 /// ArrayBuffer object. JavaScript objects can normally be garbage collected,
-/// but the existence of a PinnedBuf inhibits this until it is dropped. It
-/// behaves much like an Arc<[u8]>, although a PinnedBuf currently can't be
+/// but the existence of a ZeroCopyBuf inhibits this until it is dropped. It
+/// behaves much like an Arc<[u8]>, although a ZeroCopyBuf currently can't be
 /// cloned.
-pub struct PinnedBuf {
-  data_ptr: NonNull<u8>,
-  data_len: usize,
-  #[allow(unused)]
+pub struct ZeroCopyBuf {
   backing_store: v8::SharedRef<v8::BackingStore>,
+  byte_offset: usize,
+  byte_length: usize,
 }
 
-unsafe impl Send for PinnedBuf {}
+unsafe impl Send for ZeroCopyBuf {}
 
-impl PinnedBuf {
+impl ZeroCopyBuf {
   pub fn new(view: v8::Local<v8::ArrayBufferView>) -> Self {
-    let mut backing_store = view.buffer().unwrap().get_backing_store();
-    let backing_store_ptr = backing_store.data() as *mut _ as *mut u8;
-    let view_ptr = unsafe { backing_store_ptr.add(view.byte_offset()) };
-    let view_len = view.byte_length();
+    let backing_store = view.buffer().unwrap().get_backing_store();
+    let byte_offset = view.byte_offset();
+    let byte_length = view.byte_length();
     Self {
-      data_ptr: NonNull::new(view_ptr).unwrap(),
-      data_len: view_len,
       backing_store,
+      byte_offset,
+      byte_length,
     }
   }
 }
 
-impl Deref for PinnedBuf {
+impl Deref for ZeroCopyBuf {
   type Target = [u8];
   fn deref(&self) -> &[u8] {
-    unsafe { slice::from_raw_parts(self.data_ptr.as_ptr(), self.data_len) }
+    let buf = unsafe { &**self.backing_store.get() };
+    &buf[self.byte_offset..self.byte_offset + self.byte_length]
   }
 }
 
-impl DerefMut for PinnedBuf {
+impl DerefMut for ZeroCopyBuf {
   fn deref_mut(&mut self) -> &mut [u8] {
-    unsafe { slice::from_raw_parts_mut(self.data_ptr.as_ptr(), self.data_len) }
+    let buf = unsafe { &mut **self.backing_store.get() };
+    &mut buf[self.byte_offset..self.byte_offset + self.byte_length]
   }
 }
 
-impl AsRef<[u8]> for PinnedBuf {
+impl AsRef<[u8]> for ZeroCopyBuf {
   fn as_ref(&self) -> &[u8] {
     &*self
   }
 }
 
-impl AsMut<[u8]> for PinnedBuf {
+impl AsMut<[u8]> for ZeroCopyBuf {
   fn as_mut(&mut self) -> &mut [u8] {
     &mut *self
   }
@@ -173,7 +166,6 @@ pub struct Isolate {
   pub(crate) shared_ab: v8::Global<v8::SharedArrayBuffer>,
   pub(crate) js_recv_cb: v8::Global<v8::Function>,
   pub(crate) pending_promise_map: HashMap<i32, v8::Global<v8::Value>>,
-  pub(crate) shared_response_buf: v8::Global<v8::ArrayBuffer>,
   shared_isolate_handle: Arc<Mutex<Option<*mut v8::Isolate>>>,
   js_error_create: Arc<JSErrorCreateFn>,
   needs_init: bool,
@@ -205,7 +197,6 @@ impl Drop for Isolate {
       // </Boilerplate>
       self.global_context.reset(scope);
       self.shared_ab.reset(scope);
-      self.shared_response_buf.reset(scope);
       self.last_exception_handle.reset(scope);
       self.js_recv_cb.reset(scope);
       for (_key, handle) in self.pending_promise_map.iter_mut() {
@@ -333,7 +324,6 @@ impl Isolate {
       pending_promise_map: HashMap::new(),
       shared_ab: v8::Global::<v8::SharedArrayBuffer>::new(),
       js_recv_cb: v8::Global::<v8::Function>::new(),
-      shared_response_buf: v8::Global::<v8::ArrayBuffer>::new(),
       snapshot_creator: maybe_snapshot_creator,
       snapshot: load_snapshot,
       has_snapshotted: false,
@@ -447,7 +437,7 @@ impl Isolate {
   /// Requires runtime to explicitly ask for op ids before using any of the ops.
   pub fn register_op<F>(&self, name: &str, op: F) -> OpId
   where
-    F: Fn(&[u8], Option<PinnedBuf>) -> CoreOp + Send + Sync + 'static,
+    F: Fn(&[u8], Option<ZeroCopyBuf>) -> CoreOp + Send + Sync + 'static,
   {
     self.op_registry.register(name, op)
   }
@@ -487,7 +477,7 @@ impl Isolate {
     &mut self,
     op_id: OpId,
     control_buf: &[u8],
-    zero_copy_buf: Option<PinnedBuf>,
+    zero_copy_buf: Option<ZeroCopyBuf>,
   ) -> Option<(OpId, Box<[u8]>)> {
     let maybe_op = self.op_registry.call(op_id, control_buf, zero_copy_buf);
 
@@ -639,11 +629,11 @@ impl Isolate {
     let maybe_value = if !buf.is_empty() {
       let op_id: v8::Local<v8::Value> =
         v8::Integer::new(scope, op_id as i32).into();
-      let buf: v8::Local<v8::Value> =
-        unsafe { bindings::slice_to_uint8array(self, scope, &buf) }.into();
+      let ui8: v8::Local<v8::Value> =
+        bindings::boxed_slice_to_uint8array(scope, buf).into();
       js_recv_cb
         .unwrap()
-        .call(scope, context, global, &[op_id, buf])
+        .call(scope, context, global, &[op_id, ui8])
     } else {
       js_recv_cb.unwrap().call(scope, context, global, &[])
     };
@@ -680,7 +670,6 @@ impl Isolate {
     let mut hs = v8::HandleScope::new(locker.enter());
     let scope = hs.enter();
     self.global_context.reset(scope);
-    self.shared_response_buf.reset(scope);
 
     let snapshot_creator = self.snapshot_creator.as_mut().unwrap();
     let snapshot = snapshot_creator
@@ -829,7 +818,7 @@ pub mod tests {
     let mut isolate = Isolate::new(StartupData::None, false);
 
     let dispatcher =
-      move |control: &[u8], _zero_copy: Option<PinnedBuf>| -> CoreOp {
+      move |control: &[u8], _zero_copy: Option<ZeroCopyBuf>| -> CoreOp {
         dispatch_count_.fetch_add(1, Ordering::Relaxed);
         match mode {
           Mode::Async => {

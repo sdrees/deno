@@ -2,16 +2,13 @@
 
 use crate::es_isolate::EsIsolate;
 use crate::isolate::Isolate;
-use crate::isolate::PinnedBuf;
-use crate::isolate::SHARED_RESPONSE_BUF_SIZE;
+use crate::isolate::ZeroCopyBuf;
 
 use rusty_v8 as v8;
 use v8::MapFnTo;
 
 use std::convert::TryFrom;
 use std::option::Option;
-use std::ptr;
-use std::slice;
 
 lazy_static! {
   pub static ref EXTERNAL_REFERENCES: v8::ExternalReferences =
@@ -181,38 +178,16 @@ pub fn initialize_context<'s>(
   scope.escape(context)
 }
 
-pub unsafe fn slice_to_uint8array<'sc>(
-  deno_isolate: &mut Isolate,
+pub fn boxed_slice_to_uint8array<'sc>(
   scope: &mut impl v8::ToLocal<'sc>,
-  buf: &[u8],
+  buf: Box<[u8]>,
 ) -> v8::Local<'sc, v8::Uint8Array> {
-  if buf.is_empty() {
-    let ab = v8::ArrayBuffer::new(scope, 0);
-    return v8::Uint8Array::new(ab, 0, 0).expect("Failed to create UintArray8");
-  }
-
+  assert!(!buf.is_empty());
   let buf_len = buf.len();
-  let buf_ptr = buf.as_ptr();
-
-  // To avoid excessively allocating new ArrayBuffers, we try to reuse a single
-  // global ArrayBuffer. The caveat is that users must extract data from it
-  // before the next tick. We only do this for ArrayBuffers less than 1024
-  // bytes.
-  let ab = if buf_len > SHARED_RESPONSE_BUF_SIZE {
-    // Simple case. We allocate a new ArrayBuffer for this.
-    v8::ArrayBuffer::new(scope, buf_len)
-  } else if deno_isolate.shared_response_buf.is_empty() {
-    let buf = v8::ArrayBuffer::new(scope, SHARED_RESPONSE_BUF_SIZE);
-    deno_isolate.shared_response_buf.set(scope, buf);
-    buf
-  } else {
-    deno_isolate.shared_response_buf.get(scope).unwrap()
-  };
-
-  let mut backing_store = ab.get_backing_store();
-  let data = backing_store.data();
-  let data: *mut u8 = data as *mut libc::c_void as *mut u8;
-  std::ptr::copy_nonoverlapping(buf_ptr, data, buf_len);
+  let backing_store = v8::ArrayBuffer::new_backing_store_from_boxed_slice(buf);
+  let mut backing_store_shared = backing_store.make_shared();
+  let ab =
+    v8::ArrayBuffer::with_backing_store(scope, &mut backing_store_shared);
   v8::Uint8Array::new(ab, 0, buf_len).expect("Failed to create UintArray8")
 }
 
@@ -421,18 +396,18 @@ fn send(
 
   let control = match v8::Local::<v8::ArrayBufferView>::try_from(args.get(1)) {
     Ok(view) => {
-      let mut backing_store = view.buffer().unwrap().get_backing_store();
-      let backing_store_ptr = backing_store.data() as *mut _ as *mut u8;
-      let view_ptr = unsafe { backing_store_ptr.add(view.byte_offset()) };
-      let view_len = view.byte_length();
-      unsafe { slice::from_raw_parts(view_ptr, view_len) }
+      let byte_offset = view.byte_offset();
+      let byte_length = view.byte_length();
+      let backing_store = view.buffer().unwrap().get_backing_store();
+      let buf = unsafe { &**backing_store.get() };
+      &buf[byte_offset..byte_offset + byte_length]
     }
-    Err(..) => unsafe { slice::from_raw_parts(ptr::null(), 0) },
+    Err(..) => &[],
   };
 
-  let zero_copy: Option<PinnedBuf> =
+  let zero_copy: Option<ZeroCopyBuf> =
     v8::Local::<v8::ArrayBufferView>::try_from(args.get(2))
-      .map(PinnedBuf::new)
+      .map(ZeroCopyBuf::new)
       .ok();
 
   // If response is empty then it's either async op or exception was thrown
@@ -444,8 +419,8 @@ fn send(
     let (_op_id, buf) = response;
 
     if !buf.is_empty() {
-      let ab = unsafe { slice_to_uint8array(deno_isolate, scope, &buf) };
-      rv.set(ab.into())
+      let ui8 = boxed_slice_to_uint8array(scope, buf);
+      rv.set(ui8.into())
     }
   }
 }
@@ -623,7 +598,7 @@ fn shared_getter(
 
   // Lazily initialize the persistent external ArrayBuffer.
   if deno_isolate.shared_ab.is_empty() {
-    let ab = v8::SharedArrayBuffer::new_with_backing_store(
+    let ab = v8::SharedArrayBuffer::with_backing_store(
       scope,
       deno_isolate.shared.get_backing_store(),
     );
