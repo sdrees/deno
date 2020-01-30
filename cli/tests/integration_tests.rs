@@ -29,12 +29,44 @@ fn fetch_test() {
   drop(g);
 }
 
-// TODO(#2933): Rewrite this test in rust.
 #[test]
 fn fmt_test() {
-  let g = util::http_server();
-  util::run_python_script("tools/fmt_test.py");
-  drop(g);
+  use tempfile::TempDir;
+
+  let t = TempDir::new().expect("tempdir fail");
+  let fixed = util::root_path().join("cli/tests/badly_formatted_fixed.js");
+  let badly_formatted_original =
+    util::root_path().join("cli/tests/badly_formatted.js");
+  let badly_formatted = t.path().join("badly_formatted.js");
+  let badly_formatted_str = badly_formatted.to_str().unwrap();
+  std::fs::copy(&badly_formatted_original, &badly_formatted)
+    .expect("Failed to copy file");
+
+  let status = util::deno_cmd()
+    .current_dir(util::root_path())
+    .arg("fmt")
+    .arg("--check")
+    .arg(badly_formatted_str)
+    .spawn()
+    .expect("Failed to spawn script")
+    .wait()
+    .expect("Failed to wait for child process");
+
+  assert_eq!(Some(1), status.code());
+
+  let status = util::deno_cmd()
+    .current_dir(util::root_path())
+    .arg("fmt")
+    .arg(badly_formatted_str)
+    .spawn()
+    .expect("Failed to spawn script")
+    .wait()
+    .expect("Failed to wait for child process");
+
+  assert_eq!(Some(0), status.code());
+  let expected = std::fs::read_to_string(fixed).unwrap();
+  let actual = std::fs::read_to_string(badly_formatted).unwrap();
+  assert_eq!(expected, actual);
 }
 
 #[test]
@@ -288,11 +320,6 @@ itest!(_036_import_map_fetch {
   output: "036_import_map_fetch.out",
 });
 
-itest!(_037_current_thread {
-  args: "run --current-thread --reload 034_onload/main.ts",
-  output: "034_onload.out",
-});
-
 itest!(_038_checkjs {
   // checking if JS file is run through TS compiler
   args: "run --reload --config 038_checkjs.tsconfig.json 038_checkjs.js",
@@ -388,6 +415,13 @@ itest!(_052_no_remote_flag {
 itest!(_054_info_local_imports {
   args: "info 005_more_imports.ts",
   output: "054_info_local_imports.out",
+  exit_code: 0,
+});
+
+itest!(lock_write_fetch {
+  args:
+    "run --allow-read --allow-write --allow-env --allow-run lock_write_fetch.ts",
+  output: "lock_write_fetch.ts.out",
   exit_code: 0,
 });
 
@@ -615,6 +649,17 @@ itest!(type_definitions {
   output: "type_definitions.ts.out",
 });
 
+itest!(type_directives_01 {
+  args: "run --reload -L debug type_directives_01.ts",
+  output: "type_directives_01.ts.out",
+  http_server: true,
+});
+
+itest!(type_directives_02 {
+  args: "run --reload -L debug type_directives_02.ts",
+  output: "type_directives_02.ts.out",
+});
+
 itest!(types {
   args: "types",
   output: "types.out",
@@ -631,12 +676,19 @@ itest!(unbuffered_stdout {
   output: "unbuffered_stdout.ts.out",
 });
 
-itest!(v8_flags {
+// Cannot write the expression to evaluate as "console.log(typeof gc)"
+// because itest! splits args on whitespace.
+itest!(eval_v8_flags {
+  args: "eval --v8-flags=--expose-gc console.log(typeof(gc))",
+  output: "v8_flags.js.out",
+});
+
+itest!(run_v8_flags {
   args: "run --v8-flags=--expose-gc v8_flags.js",
   output: "v8_flags.js.out",
 });
 
-itest!(v8_help {
+itest!(run_v8_help {
   args: "run --v8-flags=--help",
   output: "v8_help.out",
 });

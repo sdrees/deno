@@ -37,6 +37,12 @@ lazy_static! {
     Regex::new(r#""checkJs"\s*?:\s*?true"#).unwrap();
 }
 
+#[derive(Clone, Copy)]
+pub enum TargetLib {
+  Main,
+  Worker,
+}
+
 /// Struct which represents the state of the compiler
 /// configuration where the first is canonical name for the configuration file,
 /// second is a vector of the bytes of the contents of the configuration file,
@@ -160,12 +166,13 @@ fn req(
   root_names: Vec<String>,
   compiler_config: CompilerConfig,
   out_file: Option<String>,
+  target: &str,
   bundle: bool,
 ) -> Buf {
   let j = match (compiler_config.path, compiler_config.content) {
     (Some(config_path), Some(config_data)) => json!({
       "type": request_type as i32,
-      "target": "main",
+      "target": target,
       "rootNames": root_names,
       "outFile": out_file,
       "bundle": bundle,
@@ -174,7 +181,7 @@ fn req(
     }),
     _ => json!({
       "type": request_type as i32,
-      "target": "main",
+      "target": target,
       "rootNames": root_names,
       "outFile": out_file,
       "bundle": bundle,
@@ -248,9 +255,7 @@ impl TsCompiler {
       worker_state,
       ext,
     );
-    worker.execute("bootstrapCompilerRuntime('TS')").unwrap();
-    worker.execute("bootstrapWorkerRuntime()").unwrap();
-    worker.execute("bootstrapTsCompiler()").unwrap();
+    worker.execute("bootstrapTsCompilerRuntime()").unwrap();
     worker
   }
 
@@ -271,6 +276,7 @@ impl TsCompiler {
       root_names,
       self.config.clone(),
       out_file,
+      "main",
       true,
     );
 
@@ -318,6 +324,7 @@ impl TsCompiler {
     &self,
     global_state: ThreadSafeGlobalState,
     source_file: &SourceFile,
+    target: TargetLib,
   ) -> Pin<Box<CompiledModuleFuture>> {
     if self.has_compiled(&source_file.url) {
       return match self.get_compiled_module(&source_file.url) {
@@ -360,12 +367,18 @@ impl TsCompiler {
       &source_file.url
     );
 
+    let target = match target {
+      TargetLib::Main => "main",
+      TargetLib::Worker => "worker",
+    };
+
     let root_names = vec![module_url.to_string()];
     let req_msg = req(
       msg::CompilerRequestType::Compile,
       root_names,
       self.config.clone(),
       None,
+      target,
       false,
     );
 
@@ -454,6 +467,7 @@ impl TsCompiler {
       filename: compiled_code_filename,
       media_type: msg::MediaType::JavaScript,
       source_code: compiled_code,
+      types_url: None,
     };
 
     Ok(compiled_module)
@@ -521,6 +535,7 @@ impl TsCompiler {
       filename: source_map_filename,
       media_type: msg::MediaType::JavaScript,
       source_code,
+      types_url: None,
     };
 
     Ok(source_map_file)
@@ -694,6 +709,7 @@ mod tests {
       filename: PathBuf::from(p.to_str().unwrap().to_string()),
       media_type: msg::MediaType::TypeScript,
       source_code: include_bytes!("../tests/002_hello.ts").to_vec(),
+      types_url: None,
     };
 
     let mock_state = ThreadSafeGlobalState::mock(vec![
@@ -704,7 +720,7 @@ mod tests {
     let fut = async move {
       let result = mock_state
         .ts_compiler
-        .compile_async(mock_state.clone(), &out)
+        .compile_async(mock_state.clone(), &out, TargetLib::Main)
         .await;
 
       assert!(result.is_ok());
@@ -712,7 +728,7 @@ mod tests {
         .unwrap()
         .code
         .as_bytes()
-        .starts_with("console.log(\"Hello World\");".as_bytes()));
+        .starts_with(b"console.log(\"Hello World\");"));
     };
 
     tokio_util::run(fut.boxed())
