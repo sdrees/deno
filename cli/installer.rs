@@ -22,7 +22,7 @@ lazy_static! {
     ).case_insensitive(true).build().unwrap();
 }
 
-fn is_remote_url(module_url: &str) -> bool {
+pub fn is_remote_url(module_url: &str) -> bool {
   module_url.starts_with("http://") || module_url.starts_with("https://")
 }
 
@@ -101,14 +101,14 @@ fn get_installer_dir() -> Result<PathBuf, Error> {
 
 pub fn install(
   flags: DenoFlags,
-  installation_dir: Option<String>,
+  installation_dir: Option<PathBuf>,
   exec_name: &str,
   module_url: &str,
   args: Vec<String>,
   force: bool,
 ) -> Result<(), Error> {
   let installation_dir = if let Some(dir) = installation_dir {
-    PathBuf::from(dir).canonicalize()?
+    dir.canonicalize()?
   } else {
     get_installer_dir()?
   };
@@ -245,7 +245,7 @@ mod tests {
     let temp_dir = TempDir::new().expect("tempdir fail");
     install(
       DenoFlags::default(),
-      Some(temp_dir.path().to_string_lossy().to_string()),
+      Some(temp_dir.path().to_path_buf()),
       "echo_test",
       "http://localhost:4545/cli/tests/echo_server.ts",
       vec![],
@@ -274,7 +274,7 @@ mod tests {
         allow_read: true,
         ..DenoFlags::default()
       },
-      Some(temp_dir.path().to_string_lossy().to_string()),
+      Some(temp_dir.path().to_path_buf()),
       "echo_test",
       "http://localhost:4545/cli/tests/echo_server.ts",
       vec!["--foobar".to_string()],
@@ -301,7 +301,7 @@ mod tests {
 
     install(
       DenoFlags::default(),
-      Some(temp_dir.path().to_string_lossy().to_string()),
+      Some(temp_dir.path().to_path_buf()),
       "echo_test",
       &local_module_str,
       vec![],

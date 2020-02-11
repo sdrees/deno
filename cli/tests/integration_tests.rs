@@ -108,7 +108,7 @@ fn installer_test_local_module_run() {
   let local_module_str = local_module.to_string_lossy();
   installer::install(
     DenoFlags::default(),
-    Some(temp_dir.path().to_string_lossy().to_string()),
+    Some(temp_dir.path().to_path_buf()),
     "echo_test",
     &local_module_str,
     vec!["hello".to_string()],
@@ -156,7 +156,7 @@ fn installer_test_remote_module_run() {
   let temp_dir = TempDir::new().expect("tempdir fail");
   installer::install(
     DenoFlags::default(),
-    Some(temp_dir.path().to_string_lossy().to_string()),
+    Some(temp_dir.path().to_path_buf()),
     "echo_test",
     "http://localhost:4545/cli/tests/echo.ts",
     vec!["hello".to_string()],
@@ -397,12 +397,10 @@ itest!(_026_redirect_javascript {
   http_server: true,
 });
 
-/* TODO(ry) Disabled to get #3844 landed faster. Re-enable.
 itest!(_026_workers {
   args: "run --reload 026_workers.ts",
   output: "026_workers.ts.out",
 });
-*/
 
 itest!(workers_basic {
   args: "run --reload workers_basic.ts",
