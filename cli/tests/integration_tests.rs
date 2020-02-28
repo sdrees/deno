@@ -788,6 +788,12 @@ itest!(_029_eval {
   output: "029_eval.out",
 });
 
+// Ugly parentheses due to whitespace delimiting problem.
+itest!(_030_eval_ts {
+  args: "eval -T console.log((123)as(number))", // 'as' is a TS keyword only
+  output: "030_eval_ts.out",
+});
+
 itest!(_033_import_map {
   args:
     "run --reload --importmap=importmaps/import_map.json importmaps/test.ts",
@@ -928,6 +934,11 @@ itest!(_055_import_wasm_via_network {
 itest!(_056_make_temp_file_write_perm {
   args: "run --allow-write=./subdir/ 056_make_temp_file_write_perm.ts",
   output: "056_make_temp_file_write_perm.out",
+});
+
+itest!(_057_revoke_permissions {
+  args: "test -A 057_revoke_permissions.ts",
+  output: "057_revoke_permissions.out",
 });
 
 itest!(js_import_detect {
