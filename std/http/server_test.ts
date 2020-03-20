@@ -10,11 +10,12 @@ import {
   assert,
   assertEquals,
   assertNotEOF,
-  assertStrContains
+  assertStrContains,
+  assertThrowsAsync
 } from "../testing/asserts.ts";
 import { Response, ServerRequest, Server, serve } from "./server.ts";
 import { BufReader, BufWriter } from "../io/bufio.ts";
-import { delay, deferred } from "../util/async.ts";
+import { delay } from "../util/async.ts";
 import { encode, decode } from "../strings/mod.ts";
 import { mockConn } from "./mock.ts";
 
@@ -67,7 +68,7 @@ test(async function responseWrite(): Promise<void> {
   }
 });
 
-test(async function requestContentLength(): Promise<void> {
+test(function requestContentLength(): void {
   // Has content length
   {
     const req = new ServerRequest();
@@ -461,12 +462,12 @@ test({
   async fn(): Promise<void> {
     async function iteratorReq(server: Server): Promise<void> {
       for await (const req of server) {
-        req.respond({ body: new TextEncoder().encode(req.url) });
+        await req.respond({ body: new TextEncoder().encode(req.url) });
       }
     }
 
     const server = serve(":8123");
-    iteratorReq(server);
+    const p = iteratorReq(server);
     const conn = await Deno.connect({ hostname: "127.0.0.1", port: 8123 });
     await Deno.writeAll(
       conn,
@@ -478,8 +479,7 @@ test({
     const resStr = new TextDecoder().decode(res.subarray(0, nread));
     assertStrContains(resStr, "/hello");
     server.close();
-    // Defer to allow async ops to resolve after server has been closed.
-    await delay(0);
+    await p;
     // Client connection should still be open, verify that
     // it's visible in resource table.
     const resources = Deno.resources();
@@ -488,57 +488,23 @@ test({
   }
 });
 
-// TODO(kevinkassimo): create a test that works on Windows.
-// The following test is to ensure that if an error occurs during respond
-// would result in connection closed. (such that fd/resource is freed).
-// On *nix, a delayed second attempt to write to a CLOSE_WAIT connection would
-// receive a RST and thus trigger an error during response for us to test.
-// We need to find a way to similarly trigger an error on Windows so that
-// we can test if connection is closed.
 test({
-  ignore: Deno.build.os == "win",
-  name: "respond error handling",
+  name: "respond error closes connection",
   async fn(): Promise<void> {
-    const connClosedPromise = deferred();
     const serverRoutine = async (): Promise<void> => {
-      let reqCount = 0;
       const server = serve(":8124");
       // @ts-ignore
-      const serverRid = server.listener["rid"];
-      let connRid = -1;
       for await (const req of server) {
-        connRid = req.conn.rid;
-        reqCount++;
-        await Deno.readAll(req.body);
-        await connClosedPromise;
-        try {
+        await assertThrowsAsync(async () => {
           await req.respond({
+            status: 12345,
             body: new TextEncoder().encode("Hello World")
           });
-          await delay(100);
-          req.done = deferred();
-          // This duplicate respond is to ensure we get a write failure from the
-          // other side. Our client would enter CLOSE_WAIT stage after close(),
-          // meaning first server .send (.respond) after close would still work.
-          // However, a second send would fail under RST, which is similar
-          // to the scenario where a failure happens during .respond
-          await req.respond({
-            body: new TextEncoder().encode("Hello World")
-          });
-        } catch {
-          break;
-        }
+        }, Deno.errors.InvalidData);
+        // The connection should be destroyed
+        assert(!(req.conn.rid in Deno.resources()));
+        server.close();
       }
-      server.close();
-      // Let event loop do another turn so server
-      // finishes all pending ops.
-      await delay(0);
-      const resources = Deno.resources();
-      assert(reqCount === 1);
-      // Server should be gone
-      assert(!(serverRid in resources));
-      // The connection should be destroyed
-      assert(!(connRid in resources));
     };
     const p = serverRoutine();
     const conn = await Deno.connect({
@@ -549,9 +515,7 @@ test({
       conn,
       new TextEncoder().encode("GET / HTTP/1.1\r\n\r\n")
     );
-    conn.close(); // abruptly closing connection before response.
-    // conn on server side enters CLOSE_WAIT state.
-    connClosedPromise.resolve();
+    conn.close();
     await p;
   }
 });
