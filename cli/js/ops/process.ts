@@ -1,8 +1,12 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
 import { sendSync, sendAsync } from "./dispatch_json.ts";
 import { assert } from "../util.ts";
+import { build } from "../build.ts";
 
 export function kill(pid: number, signo: number): void {
+  if (build.os === "win") {
+    throw new Error("Not yet implemented");
+  }
   sendSync("op_kill", { pid, signo });
 }
 
@@ -17,7 +21,7 @@ export function runStatus(rid: number): Promise<RunStatusResponse> {
 }
 
 interface RunRequest {
-  args: string[];
+  cmd: string[];
   cwd?: string;
   env?: Array<[string, string]>;
   stdin: string;
@@ -37,6 +41,6 @@ interface RunResponse {
 }
 
 export function run(request: RunRequest): RunResponse {
-  assert(request.args.length > 0);
+  assert(request.cmd.length > 0);
   return sendSync("op_run", request);
 }

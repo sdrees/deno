@@ -14,15 +14,15 @@ Deno.test(function t2(): void {
 /** A more complicated test that runs a subprocess. */
 Deno.test(async function catSmoke(): Promise<void> {
   const p = run({
-    args: [
+    cmd: [
       Deno.execPath(),
       "run",
       "--allow-read",
       "examples/cat.ts",
-      "README.md"
+      "README.md",
     ],
     stdout: "null",
-    stderr: "null"
+    stderr: "null",
   });
   const s = await p.status();
   assertEquals(s.code, 0);
