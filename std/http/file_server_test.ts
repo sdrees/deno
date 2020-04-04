@@ -2,6 +2,8 @@
 import { assert, assertEquals, assertStrContains } from "../testing/asserts.ts";
 import { BufReader } from "../io/bufio.ts";
 import { TextProtoReader } from "../textproto/mod.ts";
+import { ServerRequest } from "./server.ts";
+import { serveFile } from "./file_server.ts";
 const { test } = Deno;
 let fileServer: Deno.Process;
 
@@ -31,14 +33,13 @@ function killFileServer(): void {
   fileServer.stdout?.close();
 }
 
-test(async function serveFile(): Promise<void> {
+test("file_server serveFile", async (): Promise<void> => {
   await startFileServer();
   try {
     const res = await fetch("http://localhost:4500/README.md");
     assert(res.headers.has("access-control-allow-origin"));
     assert(res.headers.has("access-control-allow-headers"));
-    assert(res.headers.has("content-type"));
-    assert(res.headers.get("content-type")!.includes("charset=utf-8"));
+    assertEquals(res.headers.get("content-type"), "text/markdown");
     const downloadedFile = await res.text();
     const localFile = new TextDecoder().decode(
       await Deno.readFile("README.md")
@@ -140,4 +141,12 @@ test(async function printHelp(): Promise<void> {
   assert(s !== Deno.EOF && s.includes("Deno File Server"));
   helpProcess.close();
   helpProcess.stdout.close();
+});
+
+test("contentType", async () => {
+  const request = new ServerRequest();
+  const response = await serveFile(request, "http/testdata/hello.html");
+  const contentType = response.headers!.get("content-type");
+  assertEquals(contentType, "text/html");
+  (response.body as Deno.File).close();
 });

@@ -8,9 +8,9 @@ use serde_json::json;
 fn export_fn() {
   let source_code = r#"/**
 * Hello there, this is a multiline JSdoc.
-* 
+*
 * It has many lines
-* 
+*
 * Or not that many?
 */
 export function foo(a: string, b: number): void {
@@ -104,7 +104,7 @@ fn export_const() {
 fn export_class() {
   let source_code = r#"
 /** Class doc */
-export class Foobar extends Fizz implements Buzz {
+export class Foobar extends Fizz implements Buzz, Aldrin {
     private private1: boolean;
     protected protected1: number;
     public public1: boolean;
@@ -139,6 +139,8 @@ export class Foobar extends Fizz implements Buzz {
     "jsDoc": "Class doc",
     "classDef": {
       "isAbstract": false,
+      "superClass": "Fizz",
+      "implements": ["Buzz", "Aldrin"],
       "constructors": [
         {
           "jsDoc": "Constructor js doc",
@@ -308,7 +310,7 @@ export class Foobar extends Fizz implements Buzz {
 
   assert!(
     colors::strip_ansi_codes(super::printer::format(entries).as_str())
-      .contains("class Foobar")
+      .contains("class Foobar extends Fizz implements Buzz, Aldrin")
   );
 }
 
@@ -591,6 +593,100 @@ export namespace RootNs {
   );
 }
 
+#[test]
+fn declare_namespace() {
+  let source_code = r#"
+/** Namespace JSdoc */
+declare namespace RootNs {
+    declare const a = "a";
+
+    /** Nested namespace JSDoc */
+    declare namespace NestedNs {
+      declare enum Foo {
+        a = 1,
+        b = 2,
+        c = 3,
+      }
+    }
+}
+    "#;
+  let entries = DocParser::default()
+    .parse("test.ts".to_string(), source_code.to_string())
+    .unwrap();
+  assert_eq!(entries.len(), 1);
+  let entry = &entries[0];
+  let expected_json = json!({
+    "kind": "namespace",
+    "name": "RootNs",
+    "location": {
+      "filename": "test.ts",
+      "line": 3,
+      "col": 0
+    },
+    "jsDoc": "Namespace JSdoc",
+    "namespaceDef": {
+      "elements": [
+        {
+          "kind": "variable",
+          "name": "a",
+          "location": {
+            "filename": "test.ts",
+            "line": 4,
+            "col": 12
+          },
+          "jsDoc": null,
+          "variableDef": {
+            "tsType": null,
+            "kind": "const"
+          }
+        },
+        {
+          "kind": "namespace",
+          "name": "NestedNs",
+          "location": {
+            "filename": "test.ts",
+            "line": 7,
+            "col": 4
+          },
+          "jsDoc": "Nested namespace JSDoc",
+          "namespaceDef": {
+            "elements": [
+              {
+                "kind": "enum",
+                "name": "Foo",
+                "location": {
+                  "filename": "test.ts",
+                  "line": 8,
+                  "col": 6
+                },
+                "jsDoc": null,
+                "enumDef": {
+                  "members": [
+                    {
+                      "name": "a"
+                    },
+                    {
+                      "name": "b"
+                    },
+                    {
+                      "name": "c"
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  });
+  let actual = serde_json::to_value(entry).unwrap();
+  assert_eq!(actual, expected_json);
+  assert!(
+    colors::strip_ansi_codes(super::printer::format(entries).as_str())
+      .contains("namespace RootNs")
+  );
+}
 #[test]
 fn optional_return_type() {
   let source_code = r#"

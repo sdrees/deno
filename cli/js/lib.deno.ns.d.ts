@@ -120,7 +120,7 @@ declare namespace Deno {
     failFast?: boolean;
     /** String or RegExp used to filter test to run. Only test with names
      * matching provided `String` or `RegExp` will be run. */
-    only?: string | RegExp;
+    filter?: string | RegExp;
     /** String or RegExp used to skip tests to run. Tests with names
      * matching provided `String` or `RegExp` will not be run. */
     skip?: string | RegExp;
@@ -649,7 +649,7 @@ declare namespace Deno {
    */
   export function create(path: string): Promise<File>;
 
-  /** Synchronously read from a resource ID (`rid`) into an array buffer.
+  /** Synchronously read from a resource ID (`rid`) into an array buffer (`buffer`).
    *
    * Returns either the number of bytes read during the operation or End Of File
    * (`Symbol(EOF)`) if there was nothing to read.
@@ -661,9 +661,9 @@ declare namespace Deno {
    *      const text = new TextDecoder().decode(buf);  // "hello world"
    *      Deno.close(file.rid);
    */
-  export function readSync(rid: number, p: Uint8Array): number | EOF;
+  export function readSync(rid: number, buffer: Uint8Array): number | EOF;
 
-  /** Read from a resource ID (`rid`) into an array buffer.
+  /** Read from a resource ID (`rid`) into an array buffer (`buffer`).
    *
    * Resolves to either the number of bytes read during the operation or End Of
    * File (`Symbol(EOF)`) if there was nothing to read.
@@ -675,9 +675,10 @@ declare namespace Deno {
    *      const text = new TextDecoder().decode(buf);  // "hello world"
    *      Deno.close(file.rid);
    */
-  export function read(rid: number, p: Uint8Array): Promise<number | EOF>;
+  export function read(rid: number, buffer: Uint8Array): Promise<number | EOF>;
 
-  /** Synchronously write to the resource ID (`rid`) the contents of the array buffer.
+  /** Synchronously write to the resource ID (`rid`) the contents of the array
+   * buffer (`data`).
    *
    * Returns the number of bytes written.
    *
@@ -687,9 +688,9 @@ declare namespace Deno {
    *       const bytesWritten = Deno.writeSync(file.rid, data); // 11
    *       Deno.close(file.rid);
    */
-  export function writeSync(rid: number, p: Uint8Array): number;
+  export function writeSync(rid: number, data: Uint8Array): number;
 
-  /** Write to the resource ID (`rid`) the contents of the array buffer.
+  /** Write to the resource ID (`rid`) the contents of the array buffer (`data`).
    *
    * Resolves to the number of bytes written.
    *
@@ -699,10 +700,11 @@ declare namespace Deno {
    *      const bytesWritten = await Deno.write(file.rid, data); // 11
    *      Deno.close(file.rid);
    */
-  export function write(rid: number, p: Uint8Array): Promise<number>;
+  export function write(rid: number, data: Uint8Array): Promise<number>;
 
   /** Synchronously seek a resource ID (`rid`) to the given `offset` under mode
-   * given by `whence`.  The current position within the resource is returned.
+   * given by `whence`.  The new position within the resource (bytes from the
+   * start) is returned.
    *
    *        const file = Deno.openSync('hello.txt', {read: true, write: true, truncate: true, create: true});
    *        Deno.writeSync(file.rid, new TextEncoder().encode("Hello world"));
@@ -730,7 +732,7 @@ declare namespace Deno {
   ): number;
 
   /** Seek a resource ID (`rid`) to the given `offset` under mode given by `whence`.
-   * The call resolves to the current position within the resource.
+   * The call resolves to the new position within the resource (bytes from the start).
    *
    *        const file = await Deno.open('hello.txt', {read: true, write: true, truncate: true, create: true});
    *        await Deno.write(file.rid, new TextEncoder().encode("Hello world"));
@@ -1021,7 +1023,8 @@ declare namespace Deno {
      * directories will also be created (as with the shell command `mkdir -p`).
      * Intermediate directories are created with the same permissions.
      * When recursive is set to `true`, succeeds silently (without changing any
-     * permissions) if a directory already exists at the path. */
+     * permissions) if a directory already exists at the path, or if the path
+     * is a symlink to an existing directory. */
     recursive?: boolean;
     /** Permissions to use when creating the directory (defaults to `0o777`,
      * before the process's umask).
@@ -1035,7 +1038,7 @@ declare namespace Deno {
    *       Deno.mkdirSync("nested/directories", { recursive: true });
    *       Deno.mkdirSync("restricted_access_dir", { mode: 0o700 });
    *
-   * Throws error if the directory already exists.
+   * Defaults to throwing error if the directory already exists.
    *
    * Requires `allow-write` permission. */
   export function mkdirSync(path: string, options?: MkdirOptions): void;
@@ -1053,7 +1056,7 @@ declare namespace Deno {
    *       await Deno.mkdir("nested/directories", { recursive: true });
    *       await Deno.mkdir("restricted_access_dir", { mode: 0o700 });
    *
-   * Throws error if the directory already exists.
+   * Defaults to throwing error if the directory already exists.
    *
    * Requires `allow-write` permission. */
   export function mkdir(path: string, options?: MkdirOptions): Promise<void>;
@@ -1282,8 +1285,10 @@ declare namespace Deno {
    *
    *       Deno.renameSync("old/path", "new/path");
    *
-   * Throws error if attempting to rename to a directory which exists and is not
-   * empty.
+   * On Unix, this operation does not follow symlinks at either path.
+   *
+   * It varies between platforms when the operation throws errors, and if so what
+   * they are. It's always an error to rename anything to a non-empty directory.
    *
    * Requires `allow-read` and `allow-write` permissions. */
   export function renameSync(oldpath: string, newpath: string): void;
@@ -1295,10 +1300,12 @@ declare namespace Deno {
    *
    *       await Deno.rename("old/path", "new/path");
    *
-   * Throws error if attempting to rename to a directory which exists and is not
-   * empty.
+   * On Unix, this operation does not follow symlinks at either path.
    *
-   * Requires `allow-read` and `allow-write`. */
+   * It varies between platforms when the operation throws errors, and if so what
+   * they are. It's always an error to rename anything to a non-empty directory.
+   *
+   * Requires `allow-read` and `allow-write` permission. */
   export function rename(oldpath: string, newpath: string): Promise<void>;
 
   /** Synchronously reads and returns the entire contents of a file as an array

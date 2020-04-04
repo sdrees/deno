@@ -1,13 +1,13 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+use crate::swc_common::SourceMap;
+use crate::swc_common::Spanned;
+use crate::swc_ecma_ast;
 use serde::Serialize;
-use swc_common;
-use swc_common::SourceMap;
-use swc_common::Spanned;
-use swc_ecma_ast;
 
 use super::function::function_to_function_def;
 use super::function::FunctionDef;
 use super::parser::DocParser;
+use super::ts_type::ts_entity_name_to_name;
 use super::ts_type::ts_type_ann_to_def;
 use super::ts_type::TsTypeDef;
 use super::Location;
@@ -54,19 +54,20 @@ pub struct ClassMethodDef {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct ClassDef {
-  // TODO: decorators, super_class, implements,
-  // type_params, super_type_params
+  // TODO: decorators, type_params, super_type_params
   pub is_abstract: bool,
   pub constructors: Vec<ClassConstructorDef>,
   pub properties: Vec<ClassPropertyDef>,
   pub methods: Vec<ClassMethodDef>,
+  pub super_class: Option<String>,
+  pub implements: Vec<String>,
 }
 
 fn prop_name_to_string(
   source_map: &SourceMap,
   prop_name: &swc_ecma_ast::PropName,
 ) -> String {
-  use swc_ecma_ast::PropName;
+  use crate::swc_ecma_ast::PropName;
   match prop_name {
     PropName::Ident(ident) => ident.sym.to_string(),
     PropName::Str(str_) => str_.value.to_string(),
@@ -85,8 +86,27 @@ pub fn get_doc_for_class_decl(
   let mut methods = vec![];
   let mut properties = vec![];
 
+  let super_class: Option<String> = match &class_decl.class.super_class {
+    Some(boxed) => {
+      use crate::swc_ecma_ast::Expr;
+      let expr: &Expr = &**boxed;
+      match expr {
+        Expr::Ident(ident) => Some(ident.sym.to_string()),
+        _ => None,
+      }
+    }
+    None => None,
+  };
+
+  let implements: Vec<String> = class_decl
+    .class
+    .implements
+    .iter()
+    .map(|expr| ts_entity_name_to_name(&expr.expr))
+    .collect();
+
   for member in &class_decl.class.body {
-    use swc_ecma_ast::ClassMember::*;
+    use crate::swc_ecma_ast::ClassMember::*;
 
     match member {
       Constructor(ctor) => {
@@ -97,8 +117,8 @@ pub fn get_doc_for_class_decl(
         let mut params = vec![];
 
         for param in &ctor.params {
-          use swc_ecma_ast::Pat;
-          use swc_ecma_ast::PatOrTsParamProp::*;
+          use crate::swc_ecma_ast::Pat;
+          use crate::swc_ecma_ast::PatOrTsParamProp::*;
 
           let param_def = match param {
             Pat(pat) => match pat {
@@ -167,7 +187,7 @@ pub fn get_doc_for_class_decl(
           .as_ref()
           .map(|rt| ts_type_ann_to_def(&doc_parser.source_map, rt));
 
-        use swc_ecma_ast::Expr;
+        use crate::swc_ecma_ast::Expr;
         let prop_name = match &*class_prop.key {
           Expr::Ident(ident) => ident.sym.to_string(),
           _ => "<TODO>".to_string(),
@@ -198,6 +218,8 @@ pub fn get_doc_for_class_decl(
   let class_name = class_decl.ident.sym.to_string();
   let class_def = ClassDef {
     is_abstract: class_decl.class.is_abstract,
+    super_class,
+    implements,
     constructors,
     properties,
     methods,

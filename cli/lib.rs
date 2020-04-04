@@ -33,7 +33,7 @@ pub mod flags;
 mod fmt;
 pub mod fmt_errors;
 mod fs;
-mod global_state;
+pub mod global_state;
 mod global_timer;
 pub mod http_cache;
 mod http_util;
@@ -61,11 +61,16 @@ pub mod version;
 mod web_worker;
 pub mod worker;
 
+pub use dprint_plugin_typescript::swc_common;
+pub use dprint_plugin_typescript::swc_ecma_ast;
+pub use dprint_plugin_typescript::swc_ecma_parser;
+
 use crate::compilers::TargetLib;
 use crate::file_fetcher::SourceFile;
 use crate::global_state::GlobalState;
 use crate::msg::MediaType;
 use crate::ops::io::get_stdio;
+use crate::state::DebugType;
 use crate::state::State;
 use crate::worker::MainWorker;
 use deno_core::v8_set_flags;
@@ -128,7 +133,7 @@ fn create_main_worker(
   global_state: GlobalState,
   main_module: ModuleSpecifier,
 ) -> Result<MainWorker, ErrBox> {
-  let state = State::new(global_state, None, main_module)?;
+  let state = State::new(global_state, None, main_module, DebugType::Main)?;
 
   {
     let mut s = state.borrow_mut();
@@ -445,6 +450,7 @@ async fn test_command(
   include: Option<Vec<String>>,
   fail_fast: bool,
   allow_none: bool,
+  filter: Option<String>,
 ) -> Result<(), ErrBox> {
   let global_state = GlobalState::new(flags.clone())?;
   let cwd = std::env::current_dir().expect("No current directory");
@@ -462,7 +468,8 @@ async fn test_command(
   let test_file_path = cwd.join(".deno.test.ts");
   let test_file_url =
     Url::from_file_path(&test_file_path).expect("Should be valid file url");
-  let test_file = test_runner::render_test_file(test_modules, fail_fast);
+  let test_file =
+    test_runner::render_test_file(test_modules, fail_fast, filter);
   let main_module =
     ModuleSpecifier::resolve_url(&test_file_url.to_string()).unwrap();
   let mut worker =
@@ -545,7 +552,10 @@ pub fn main() {
       fail_fast,
       include,
       allow_none,
-    } => test_command(flags, include, fail_fast, allow_none).boxed_local(),
+      filter,
+    } => {
+      test_command(flags, include, fail_fast, allow_none, filter).boxed_local()
+    }
     DenoSubcommand::Completions { buf } => {
       if let Err(e) = write_to_stdout_ignore_sigpipe(&buf) {
         eprintln!("{}", e);
