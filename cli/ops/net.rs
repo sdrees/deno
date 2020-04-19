@@ -81,9 +81,9 @@ fn accept_tcp(
     let mut state = state_.borrow_mut();
     let rid = state.resource_table.add(
       "tcpStream",
-      Box::new(StreamResourceHolder::new(StreamResource::TcpStream(
+      Box::new(StreamResourceHolder::new(StreamResource::TcpStream(Some(
         tcp_stream,
-      ))),
+      )))),
     );
     Ok(json!({
       "rid": rid,
@@ -215,7 +215,7 @@ fn op_send(
             OpError::bad_resource("Socket has been closed".to_string())
           })?;
         let socket = &mut resource.socket;
-        let addr = resolve_addr(&args.hostname, args.port).await?;
+        let addr = resolve_addr(&args.hostname, args.port)?;
         socket.send_to(&buf, addr).await?;
         Ok(json!({}))
       };
@@ -273,16 +273,16 @@ fn op_connect(
       let state_ = state.clone();
       state.check_net(&args.hostname, args.port)?;
       let op = async move {
-        let addr = resolve_addr(&args.hostname, args.port).await?;
+        let addr = resolve_addr(&args.hostname, args.port)?;
         let tcp_stream = TcpStream::connect(&addr).await?;
         let local_addr = tcp_stream.local_addr()?;
         let remote_addr = tcp_stream.peer_addr()?;
         let mut state = state_.borrow_mut();
         let rid = state.resource_table.add(
           "tcpStream",
-          Box::new(StreamResourceHolder::new(StreamResource::TcpStream(
+          Box::new(StreamResourceHolder::new(StreamResource::TcpStream(Some(
             tcp_stream,
-          ))),
+          )))),
         );
         Ok(json!({
           "rid": rid,
@@ -367,7 +367,7 @@ fn op_shutdown(
     .get_mut::<StreamResourceHolder>(rid)
     .ok_or_else(OpError::bad_resource_id)?;
   match resource_holder.resource {
-    StreamResource::TcpStream(ref mut stream) => {
+    StreamResource::TcpStream(Some(ref mut stream)) => {
       TcpStream::shutdown(stream, shutdown_mode).map_err(OpError::from)?;
     }
     #[cfg(unix)]
@@ -460,7 +460,8 @@ fn listen_tcp(
   addr: SocketAddr,
 ) -> Result<(u32, SocketAddr), OpError> {
   let mut state = state.borrow_mut();
-  let listener = futures::executor::block_on(TcpListener::bind(&addr))?;
+  let std_listener = std::net::TcpListener::bind(&addr)?;
+  let listener = TcpListener::from_std(std_listener)?;
   let local_addr = listener.local_addr()?;
   let listener_resource = TcpListenerResource {
     listener,
@@ -479,7 +480,8 @@ fn listen_udp(
   addr: SocketAddr,
 ) -> Result<(u32, SocketAddr), OpError> {
   let mut state = state.borrow_mut();
-  let socket = futures::executor::block_on(UdpSocket::bind(&addr))?;
+  let std_socket = std::net::UdpSocket::bind(&addr)?;
+  let socket = UdpSocket::from_std(std_socket)?;
   let local_addr = socket.local_addr()?;
   let socket_resource = UdpSocketResource { socket };
   let rid = state
@@ -500,8 +502,7 @@ fn op_listen(
       transport_args: ArgsEnum::Ip(args),
     } => {
       state.check_net(&args.hostname, args.port)?;
-      let addr =
-        futures::executor::block_on(resolve_addr(&args.hostname, args.port))?;
+      let addr = resolve_addr(&args.hostname, args.port)?;
       let (rid, local_addr) = if transport == "tcp" {
         listen_tcp(state, addr)?
       } else {

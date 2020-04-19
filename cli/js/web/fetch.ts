@@ -1,17 +1,13 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
 import { assert, createResolvable, notImplemented } from "../util.ts";
 import { isTypedArray } from "./util.ts";
-import * as domTypes from "./dom_types.ts";
+import * as domTypes from "./dom_types.d.ts";
 import { TextDecoder, TextEncoder } from "./text_encoding.ts";
 import { DenoBlob, bytesSymbol as blobBytesSymbol } from "./blob.ts";
-import { Headers } from "./headers.ts";
 import * as io from "../io.ts";
 import { read } from "../ops/io.ts";
 import { close } from "../ops/resources.ts";
 import { Buffer } from "../buffer.ts";
-import { FormData } from "./form_data.ts";
-import { URL } from "./url.ts";
-import { URLSearchParams } from "./url_search_params.ts";
 import { fetch as opFetch, FetchResponse } from "../ops/fetch.ts";
 import { DomFileImpl } from "./dom_file.ts";
 
@@ -80,7 +76,7 @@ class Body
     return this.#bodyPromise;
   }
 
-  async blob(): Promise<domTypes.Blob> {
+  async blob(): Promise<Blob> {
     const arrayBuffer = await this.arrayBuffer();
     return new DenoBlob([arrayBuffer], {
       type: this.contentType,
@@ -88,7 +84,7 @@ class Body
   }
 
   // ref: https://fetch.spec.whatwg.org/#body-mixin
-  async formData(): Promise<domTypes.FormData> {
+  async formData(): Promise<FormData> {
     const formData = new FormData();
     const enc = new TextEncoder();
     if (hasHeaderValueOf(this.contentType, "multipart/form-data")) {
@@ -277,10 +273,10 @@ class Body
 }
 
 export class Response implements domTypes.Response {
-  readonly type: domTypes.ResponseType;
+  readonly type: ResponseType;
   readonly redirected: boolean;
-  headers: domTypes.Headers;
-  readonly trailer: Promise<domTypes.Headers>;
+  headers: Headers;
+  readonly trailer: Promise<Headers>;
   readonly body: Body | null;
 
   constructor(
@@ -290,7 +286,7 @@ export class Response implements domTypes.Response {
     headersList: Array<[string, string]>,
     rid: number,
     redirected_: boolean,
-    readonly type_: null | domTypes.ResponseType = "default",
+    readonly type_: null | ResponseType = "default",
     body_: null | Body = null
   ) {
     this.trailer = createResolvable();
@@ -384,14 +380,14 @@ export class Response implements domTypes.Response {
     return this.body.arrayBuffer();
   }
 
-  blob(): Promise<domTypes.Blob> {
+  blob(): Promise<Blob> {
     if (this.#bodyViewable() || this.body == null) {
       return Promise.reject(new Error("Response body is null"));
     }
     return this.body.blob();
   }
 
-  formData(): Promise<domTypes.FormData> {
+  formData(): Promise<FormData> {
     if (this.#bodyViewable() || this.body == null) {
       return Promise.reject(new Error("Response body is null"));
     }
@@ -447,7 +443,7 @@ export class Response implements domTypes.Response {
     );
   }
 
-  redirect(url: URL | string, status: number): domTypes.Response {
+  static redirect(url: URL | string, status: number): domTypes.Response {
     if (![301, 302, 303, 307, 308].includes(status)) {
       throw new RangeError(
         "The redirection status must be one of 301, 302, 303, 307 and 308."
@@ -469,7 +465,7 @@ export class Response implements domTypes.Response {
 function sendFetchReq(
   url: string,
   method: string | null,
-  headers: domTypes.Headers | null,
+  headers: Headers | null,
   body: ArrayBufferView | undefined
 ): Promise<FetchResponse> {
   let headerArray: Array<[string, string]> = [];
@@ -492,7 +488,7 @@ export async function fetch(
 ): Promise<Response> {
   let url: string;
   let method: string | null = null;
-  let headers: domTypes.Headers | null = null;
+  let headers: Headers | null = null;
   let body: ArrayBufferView | undefined;
   let redirected = false;
   let remRedirectCount = 20; // TODO: use a better way to handle

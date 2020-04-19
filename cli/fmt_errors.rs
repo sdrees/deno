@@ -4,7 +4,6 @@ use crate::colors;
 use crate::source_maps::apply_source_map;
 use crate::source_maps::SourceMapGetter;
 use deno_core::ErrBox;
-use deno_core::JSStackFrame;
 use std::error::Error;
 use std::fmt;
 use std::ops::Deref;
@@ -22,40 +21,34 @@ pub trait DisplayFormatter {
 }
 
 fn format_source_name(
-  script_name: String,
+  file_name: String,
   line_number: i64,
-  column: i64,
-  is_internal: bool,
+  column_number: i64,
 ) -> String {
-  let line_number = line_number + 1;
-  let column = column + 1;
-  if is_internal {
-    format!("{}:{}:{}", script_name, line_number, column)
-  } else {
-    let script_name_c = colors::cyan(script_name);
-    let line_c = colors::yellow(line_number.to_string());
-    let column_c = colors::yellow(column.to_string());
-    format!("{}:{}:{}", script_name_c, line_c, column_c)
-  }
+  let line_number = line_number;
+  let column_number = column_number;
+  let file_name_c = colors::cyan(file_name);
+  let line_c = colors::yellow(line_number.to_string());
+  let column_c = colors::yellow(column_number.to_string());
+  format!("{}:{}:{}", file_name_c, line_c, column_c)
 }
 
-/// Formats optional source, line number and column into a single string.
+/// Formats optional source, line and column numbers into a single string.
 pub fn format_maybe_source_name(
-  script_name: Option<String>,
+  file_name: Option<String>,
   line_number: Option<i64>,
-  column: Option<i64>,
+  column_number: Option<i64>,
 ) -> String {
-  if script_name.is_none() {
+  if file_name.is_none() {
     return "".to_string();
   }
 
   assert!(line_number.is_some());
-  assert!(column.is_some());
+  assert!(column_number.is_some());
   format_source_name(
-    script_name.unwrap(),
+    file_name.unwrap(),
     line_number.unwrap(),
-    column.unwrap(),
-    false,
+    column_number.unwrap(),
   )
 }
 
@@ -83,7 +76,7 @@ pub fn format_maybe_source_line(
 
   assert!(start_column.is_some());
   assert!(end_column.is_some());
-  let line_number = (1 + line_number.unwrap()).to_string();
+  let line_number = line_number.unwrap().to_string();
   let line_color = colors::black_on_white(line_number.to_string());
   let line_number_len = line_number.len();
   let line_padding =
@@ -100,12 +93,11 @@ pub fn format_maybe_source_line(
   } else {
     '~'
   };
-  for i in 0..end_column {
-    if i >= start_column {
-      s.push(underline_char);
-    } else {
-      s.push(' ');
-    }
+  for _i in 0..start_column {
+    s.push(' ');
+  }
+  for _i in 0..(end_column - start_column) {
+    s.push(underline_char);
   }
   let color_underline = if is_error {
     colors::red(s).to_string()
@@ -125,42 +117,6 @@ pub fn format_maybe_source_line(
 pub fn format_error_message(msg: String) -> String {
   let preamble = colors::red("error:".to_string());
   format!("{} {}", preamble, msg)
-}
-
-fn format_stack_frame(frame: &JSStackFrame, is_internal_frame: bool) -> String {
-  // Note when we print to string, we change from 0-indexed to 1-indexed.
-  let function_name = if is_internal_frame {
-    colors::italic_bold_gray(frame.function_name.clone()).to_string()
-  } else {
-    colors::italic_bold(frame.function_name.clone()).to_string()
-  };
-  let mut source_loc = format_source_name(
-    frame.script_name.clone(),
-    frame.line_number,
-    frame.column,
-    is_internal_frame,
-  );
-
-  // Each chunk of styled text is auto-resetted on end,
-  // which make nesting not working.
-  // Explicitly specify color for each section.
-  let mut at_prefix = "    at".to_owned();
-  if is_internal_frame {
-    at_prefix = colors::gray(at_prefix).to_string();
-  }
-  if !frame.function_name.is_empty() || frame.is_eval {
-    source_loc = format!("({})", source_loc); // wrap then style
-  }
-  if is_internal_frame {
-    source_loc = colors::gray(source_loc).to_string();
-  }
-  if !frame.function_name.is_empty() {
-    format!("{} {} {}", at_prefix, function_name, source_loc)
-  } else if frame.is_eval {
-    format!("{} eval {}", at_prefix, source_loc)
-  } else {
-    format!("{} {}", at_prefix, source_loc)
-  }
 }
 
 /// Wrapper around deno_core::JSError which provides color to_string.
@@ -224,7 +180,7 @@ impl DisplayFormatter for JSError {
       format_maybe_source_name(
         e.script_resource_name.clone(),
         e.line_number,
-        e.start_column,
+        e.start_column.map(|n| n + 1),
       )
     )
   }
@@ -239,10 +195,8 @@ impl fmt::Display for JSError {
       self.format_source_name(),
       self.format_source_line(0),
     )?;
-
-    for frame in &self.0.frames {
-      let is_internal_frame = frame.script_name.starts_with("$deno$");
-      write!(f, "\n{}", format_stack_frame(&frame, is_internal_frame))?;
+    for formatted_frame in &self.0.formatted_frames {
+      write!(f, "\n    at {}", formatted_frame)?;
     }
     Ok(())
   }
@@ -254,48 +208,6 @@ impl Error for JSError {}
 mod tests {
   use super::*;
   use crate::colors::strip_ansi_codes;
-
-  #[test]
-  fn js_error_to_string() {
-    let core_js_error = deno_core::JSError {
-      message: "Error: foo bar".to_string(),
-      source_line: None,
-      script_resource_name: None,
-      line_number: None,
-      start_column: None,
-      end_column: None,
-      frames: vec![
-        JSStackFrame {
-          line_number: 4,
-          column: 16,
-          script_name: "foo_bar.ts".to_string(),
-          function_name: "foo".to_string(),
-          is_eval: false,
-          is_constructor: false,
-        },
-        JSStackFrame {
-          line_number: 5,
-          column: 20,
-          script_name: "bar_baz.ts".to_string(),
-          function_name: "qat".to_string(),
-          is_eval: false,
-          is_constructor: false,
-        },
-        JSStackFrame {
-          line_number: 1,
-          column: 1,
-          script_name: "deno_main.js".to_string(),
-          function_name: "".to_string(),
-          is_eval: false,
-          is_constructor: false,
-        },
-      ],
-    };
-    let formatted_error = JSError(core_js_error).to_string();
-    let actual = strip_ansi_codes(&formatted_error);
-    let expected = "error: Error: foo bar\n    at foo (foo_bar.ts:5:17)\n    at qat (bar_baz.ts:6:21)\n    at deno_main.js:2:2";
-    assert_eq!(actual, expected);
-  }
 
   #[test]
   fn test_format_none_source_name() {
@@ -310,7 +222,7 @@ mod tests {
       Some(1),
       Some(2),
     );
-    assert_eq!(strip_ansi_codes(&actual), "file://foo/bar.ts:2:3");
+    assert_eq!(strip_ansi_codes(&actual), "file://foo/bar.ts:1:2");
   }
 
   #[test]
@@ -331,7 +243,7 @@ mod tests {
     );
     assert_eq!(
       strip_ansi_codes(&actual),
-      "\n\n9 console.log(\'foo\');\n          ~~~\n"
+      "\n\n8 console.log(\'foo\');\n          ~~~\n"
     );
   }
 

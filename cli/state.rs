@@ -8,9 +8,8 @@ use crate::op_error::OpError;
 use crate::ops::JsonOp;
 use crate::ops::MinimalOp;
 use crate::permissions::DenoPermissions;
-use crate::worker::WorkerHandle;
+use crate::web_worker::WebWorkerHandle;
 use deno_core::Buf;
-use deno_core::CoreOp;
 use deno_core::ErrBox;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSpecifier;
@@ -18,7 +17,6 @@ use deno_core::Op;
 use deno_core::ResourceTable;
 use deno_core::ZeroCopyBuf;
 use futures::future::FutureExt;
-use futures::future::TryFutureExt;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde_json::Value;
@@ -62,7 +60,7 @@ pub struct StateInner {
   pub import_map: Option<ImportMap>,
   pub metrics: Metrics,
   pub global_timer: GlobalTimer,
-  pub workers: HashMap<u32, (JoinHandle<()>, WorkerHandle)>,
+  pub workers: HashMap<u32, (JoinHandle<()>, WebWorkerHandle)>,
   pub next_worker_id: u32,
   pub start_time: Instant,
   pub seeded_rng: Option<StdRng>,
@@ -75,7 +73,7 @@ impl State {
   pub fn stateful_json_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> CoreOp
+  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> Op
   where
     D: Fn(&State, Value, Option<ZeroCopyBuf>) -> Result<JsonOp, OpError>,
   {
@@ -87,13 +85,13 @@ impl State {
   pub fn core_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> CoreOp
+  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> Op
   where
-    D: Fn(&[u8], Option<ZeroCopyBuf>) -> CoreOp,
+    D: Fn(&[u8], Option<ZeroCopyBuf>) -> Op,
   {
     let state = self.clone();
 
-    move |control: &[u8], zero_copy: Option<ZeroCopyBuf>| -> CoreOp {
+    move |control: &[u8], zero_copy: Option<ZeroCopyBuf>| -> Op {
       let bytes_sent_control = control.len() as u64;
       let bytes_sent_zero_copy =
         zero_copy.as_ref().map(|b| b.len()).unwrap_or(0) as u64;
@@ -116,7 +114,7 @@ impl State {
             .metrics
             .op_dispatched_async(bytes_sent_control, bytes_sent_zero_copy);
           let state = state.clone();
-          let result_fut = fut.map_ok(move |buf: Buf| {
+          let result_fut = fut.map(move |buf: Buf| {
             let mut state_ = state.borrow_mut();
             state_.metrics.op_completed_async(buf.len() as u64);
             buf
@@ -130,7 +128,7 @@ impl State {
             bytes_sent_zero_copy,
           );
           let state = state.clone();
-          let result_fut = fut.map_ok(move |buf: Buf| {
+          let result_fut = fut.map(move |buf: Buf| {
             let mut state_ = state.borrow_mut();
             state_.metrics.op_completed_async_unref(buf.len() as u64);
             buf
@@ -145,15 +143,15 @@ impl State {
   pub fn stateful_minimal_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(i32, Option<ZeroCopyBuf>) -> Pin<Box<MinimalOp>>
+  ) -> impl Fn(bool, i32, Option<ZeroCopyBuf>) -> MinimalOp
   where
-    D: Fn(&State, i32, Option<ZeroCopyBuf>) -> Pin<Box<MinimalOp>>,
+    D: Fn(&State, bool, i32, Option<ZeroCopyBuf>) -> MinimalOp,
   {
     let state = self.clone();
-
-    move |rid: i32, zero_copy: Option<ZeroCopyBuf>| -> Pin<Box<MinimalOp>> {
-      dispatcher(&state, rid, zero_copy)
-    }
+    move |is_sync: bool,
+          rid: i32,
+          zero_copy: Option<ZeroCopyBuf>|
+          -> MinimalOp { dispatcher(&state, is_sync, rid, zero_copy) }
   }
 
   /// This is a special function that provides `state` argument to dispatcher.
@@ -169,7 +167,6 @@ impl State {
     D: Fn(&State, Value, Option<ZeroCopyBuf>) -> Result<JsonOp, OpError>,
   {
     let state = self.clone();
-
     move |args: Value,
           zero_copy: Option<ZeroCopyBuf>|
           -> Result<JsonOp, OpError> { dispatcher(&state, args, zero_copy) }

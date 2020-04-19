@@ -44,13 +44,12 @@ fn op_cache(
 
   let state_ = &state.borrow().global_state;
   let ts_compiler = state_.ts_compiler.clone();
-  let fut = ts_compiler.cache_compiler_output(
+  ts_compiler.cache_compiler_output(
     &module_specifier,
     &args.extension,
     &args.contents,
-  );
+  )?;
 
-  futures::executor::block_on(fut)?;
   Ok(JsonOp::Sync(json!({})))
 }
 
@@ -156,7 +155,8 @@ fn op_fetch_source_files(
               .map_err(|e| OpError::other(e.to_string()))?
               .code
           }
-          _ => String::from_utf8(file.source_code).unwrap(),
+          _ => String::from_utf8(file.source_code)
+            .map_err(|_| OpError::invalid_utf8())?,
         };
         Ok::<_, OpError>(json!({
           "url": file.url.to_string(),
