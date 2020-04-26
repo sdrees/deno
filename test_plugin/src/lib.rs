@@ -1,19 +1,23 @@
-#[macro_use]
 extern crate deno_core;
 extern crate futures;
 
+use deno_core::Buf;
+use deno_core::CoreIsolate;
 use deno_core::Op;
-use deno_core::PluginInitContext;
-use deno_core::{Buf, ZeroCopyBuf};
+use deno_core::ZeroCopyBuf;
 use futures::future::FutureExt;
 
-fn init(context: &mut dyn PluginInitContext) {
-  context.register_op("testSync", Box::new(op_test_sync));
-  context.register_op("testAsync", Box::new(op_test_async));
+#[no_mangle]
+pub fn deno_plugin_init(isolate: &mut CoreIsolate) {
+  isolate.register_op("testSync", op_test_sync);
+  isolate.register_op("testAsync", op_test_async);
 }
-init_fn!(init);
 
-pub fn op_test_sync(data: &[u8], zero_copy: Option<ZeroCopyBuf>) -> Op {
+pub fn op_test_sync(
+  _isolate: &mut CoreIsolate,
+  data: &[u8],
+  zero_copy: Option<ZeroCopyBuf>,
+) -> Op {
   if let Some(buf) = zero_copy {
     let data_str = std::str::from_utf8(&data[..]).unwrap();
     let buf_str = std::str::from_utf8(&buf[..]).unwrap();
@@ -27,7 +31,11 @@ pub fn op_test_sync(data: &[u8], zero_copy: Option<ZeroCopyBuf>) -> Op {
   Op::Sync(result_box)
 }
 
-pub fn op_test_async(data: &[u8], zero_copy: Option<ZeroCopyBuf>) -> Op {
+pub fn op_test_async(
+  _isolate: &mut CoreIsolate,
+  data: &[u8],
+  zero_copy: Option<ZeroCopyBuf>,
+) -> Op {
   let data_str = std::str::from_utf8(&data[..]).unwrap().to_string();
   let fut = async move {
     if let Some(buf) = zero_copy {

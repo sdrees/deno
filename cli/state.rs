@@ -14,7 +14,6 @@ use deno_core::ErrBox;
 use deno_core::ModuleLoader;
 use deno_core::ModuleSpecifier;
 use deno_core::Op;
-use deno_core::ResourceTable;
 use deno_core::ZeroCopyBuf;
 use futures::future::FutureExt;
 use rand::rngs::StdRng;
@@ -64,7 +63,6 @@ pub struct StateInner {
   pub next_worker_id: u32,
   pub start_time: Instant,
   pub seeded_rng: Option<StdRng>,
-  pub resource_table: ResourceTable,
   pub target_lib: TargetLib,
   pub debug_type: DebugType,
 }
@@ -73,7 +71,7 @@ impl State {
   pub fn stateful_json_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> Op
+  ) -> impl Fn(&mut deno_core::CoreIsolate, &[u8], Option<ZeroCopyBuf>) -> Op
   where
     D: Fn(&State, Value, Option<ZeroCopyBuf>) -> Result<JsonOp, OpError>,
   {
@@ -81,22 +79,43 @@ impl State {
     self.core_op(json_op(self.stateful_op(dispatcher)))
   }
 
+  pub fn stateful_json_op2<D>(
+    &self,
+    dispatcher: D,
+  ) -> impl Fn(&mut deno_core::CoreIsolate, &[u8], Option<ZeroCopyBuf>) -> Op
+  where
+    D: Fn(
+      &mut deno_core::CoreIsolate,
+      &State,
+      Value,
+      Option<ZeroCopyBuf>,
+    ) -> Result<JsonOp, OpError>,
+  {
+    use crate::ops::json_op;
+    self.core_op(json_op(self.stateful_op2(dispatcher)))
+  }
+
   /// Wrap core `OpDispatcher` to collect metrics.
+  // TODO(ry) this should be private. Is called by stateful_json_op or
+  // stateful_minimal_op
   pub fn core_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(&[u8], Option<ZeroCopyBuf>) -> Op
+  ) -> impl Fn(&mut deno_core::CoreIsolate, &[u8], Option<ZeroCopyBuf>) -> Op
   where
-    D: Fn(&[u8], Option<ZeroCopyBuf>) -> Op,
+    D: Fn(&mut deno_core::CoreIsolate, &[u8], Option<ZeroCopyBuf>) -> Op,
   {
     let state = self.clone();
 
-    move |control: &[u8], zero_copy: Option<ZeroCopyBuf>| -> Op {
+    move |isolate: &mut deno_core::CoreIsolate,
+          control: &[u8],
+          zero_copy: Option<ZeroCopyBuf>|
+          -> Op {
       let bytes_sent_control = control.len() as u64;
       let bytes_sent_zero_copy =
         zero_copy.as_ref().map(|b| b.len()).unwrap_or(0) as u64;
 
-      let op = dispatcher(control, zero_copy);
+      let op = dispatcher(isolate, control, zero_copy);
 
       match op {
         Op::Sync(buf) => {
@@ -139,37 +158,94 @@ impl State {
     }
   }
 
-  /// This is a special function that provides `state` argument to dispatcher.
-  pub fn stateful_minimal_op<D>(
+  pub fn stateful_minimal_op2<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(bool, i32, Option<ZeroCopyBuf>) -> MinimalOp
+  ) -> impl Fn(&mut deno_core::CoreIsolate, &[u8], Option<ZeroCopyBuf>) -> Op
   where
-    D: Fn(&State, bool, i32, Option<ZeroCopyBuf>) -> MinimalOp,
+    D: Fn(
+      &mut deno_core::CoreIsolate,
+      &State,
+      bool,
+      i32,
+      Option<ZeroCopyBuf>,
+    ) -> MinimalOp,
   {
     let state = self.clone();
-    move |is_sync: bool,
-          rid: i32,
-          zero_copy: Option<ZeroCopyBuf>|
-          -> MinimalOp { dispatcher(&state, is_sync, rid, zero_copy) }
+    self.core_op(crate::ops::minimal_op(
+      move |isolate: &mut deno_core::CoreIsolate,
+            is_sync: bool,
+            rid: i32,
+            zero_copy: Option<ZeroCopyBuf>|
+            -> MinimalOp {
+        dispatcher(isolate, &state, is_sync, rid, zero_copy)
+      },
+    ))
   }
 
   /// This is a special function that provides `state` argument to dispatcher.
   ///
   /// NOTE: This only works with JSON dispatcher.
-  /// This is a band-aid for transition to `Isolate.register_op` API as most of our
+  /// This is a band-aid for transition to `CoreIsolate.register_op` API as most of our
   /// ops require `state` argument.
   pub fn stateful_op<D>(
     &self,
     dispatcher: D,
-  ) -> impl Fn(Value, Option<ZeroCopyBuf>) -> Result<JsonOp, OpError>
+  ) -> impl Fn(
+    &mut deno_core::CoreIsolate,
+    Value,
+    Option<ZeroCopyBuf>,
+  ) -> Result<JsonOp, OpError>
   where
     D: Fn(&State, Value, Option<ZeroCopyBuf>) -> Result<JsonOp, OpError>,
   {
     let state = self.clone();
-    move |args: Value,
+    move |_isolate: &mut deno_core::CoreIsolate,
+          args: Value,
           zero_copy: Option<ZeroCopyBuf>|
           -> Result<JsonOp, OpError> { dispatcher(&state, args, zero_copy) }
+  }
+
+  pub fn stateful_op2<D>(
+    &self,
+    dispatcher: D,
+  ) -> impl Fn(
+    &mut deno_core::CoreIsolate,
+    Value,
+    Option<ZeroCopyBuf>,
+  ) -> Result<JsonOp, OpError>
+  where
+    D: Fn(
+      &mut deno_core::CoreIsolate,
+      &State,
+      Value,
+      Option<ZeroCopyBuf>,
+    ) -> Result<JsonOp, OpError>,
+  {
+    let state = self.clone();
+    move |isolate: &mut deno_core::CoreIsolate,
+          args: Value,
+          zero_copy: Option<ZeroCopyBuf>|
+          -> Result<JsonOp, OpError> {
+      dispatcher(isolate, &state, args, zero_copy)
+    }
+  }
+
+  /// Quits the process if the --unstable flag was not provided.
+  ///
+  /// This is intentionally a non-recoverable check so that people cannot probe
+  /// for unstable APIs from stable programs.
+  pub fn check_unstable(&self, api_name: &str) {
+    // TODO(ry) Maybe use IsolateHandle::terminate_execution here to provide a
+    // stack trace in JS.
+    let s = self.0.borrow();
+    if !s.global_state.flags.unstable {
+      eprintln!(
+        "Unstable API '{}'. The --unstable flag must be provided.",
+        api_name
+      );
+      std::process::exit(70);
+    }
   }
 }
 
@@ -267,7 +343,6 @@ impl State {
       next_worker_id: 0,
       start_time: Instant::now(),
       seeded_rng,
-      resource_table: ResourceTable::default(),
       target_lib: TargetLib::Main,
       debug_type,
     }));
@@ -303,7 +378,6 @@ impl State {
       next_worker_id: 0,
       start_time: Instant::now(),
       seeded_rng,
-      resource_table: ResourceTable::default(),
       target_lib: TargetLib::Worker,
       debug_type: DebugType::Dependent,
     }));

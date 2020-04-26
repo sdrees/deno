@@ -3,8 +3,12 @@ extern crate derive_deref;
 #[macro_use]
 extern crate log;
 
-use deno_core::Isolate as CoreIsolate;
-use deno_core::*;
+use deno_core::CoreIsolate;
+use deno_core::Op;
+use deno_core::ResourceTable;
+use deno_core::Script;
+use deno_core::StartupData;
+use deno_core::ZeroCopyBuf;
 use futures::future::poll_fn;
 use futures::prelude::*;
 use futures::task::Context;
@@ -111,20 +115,22 @@ impl Isolate {
     F: 'static + Fn(State, u32, Option<ZeroCopyBuf>) -> Result<u32, Error>,
   {
     let state = self.state.clone();
-    let core_handler =
-      move |control_buf: &[u8], zero_copy_buf: Option<ZeroCopyBuf>| -> Op {
-        let state = state.clone();
-        let record = Record::from(control_buf);
-        let is_sync = record.promise_id == 0;
-        assert!(is_sync);
+    let core_handler = move |_isolate: &mut CoreIsolate,
+                             control_buf: &[u8],
+                             zero_copy_buf: Option<ZeroCopyBuf>|
+          -> Op {
+      let state = state.clone();
+      let record = Record::from(control_buf);
+      let is_sync = record.promise_id == 0;
+      assert!(is_sync);
 
-        let result: i32 = match handler(state, record.rid, zero_copy_buf) {
-          Ok(r) => r as i32,
-          Err(_) => -1,
-        };
-        let buf = RecordBuf::from(Record { result, ..record })[..].into();
-        Op::Sync(buf)
+      let result: i32 = match handler(state, record.rid, zero_copy_buf) {
+        Ok(r) => r as i32,
+        Err(_) => -1,
       };
+      let buf = RecordBuf::from(Record { result, ..record })[..].into();
+      Op::Sync(buf)
+    };
 
     self.core_isolate.register_op(name, core_handler);
   }
@@ -139,24 +145,26 @@ impl Isolate {
     <F::Ok as TryInto<i32>>::Error: Debug,
   {
     let state = self.state.clone();
-    let core_handler =
-      move |control_buf: &[u8], zero_copy_buf: Option<ZeroCopyBuf>| -> Op {
-        let state = state.clone();
-        let record = Record::from(control_buf);
-        let is_sync = record.promise_id == 0;
-        assert!(!is_sync);
+    let core_handler = move |_isolate: &mut CoreIsolate,
+                             control_buf: &[u8],
+                             zero_copy_buf: Option<ZeroCopyBuf>|
+          -> Op {
+      let state = state.clone();
+      let record = Record::from(control_buf);
+      let is_sync = record.promise_id == 0;
+      assert!(!is_sync);
 
-        let fut = async move {
-          let op = handler(state, record.rid, zero_copy_buf);
-          let result = op
-            .map_ok(|r| r.try_into().expect("op result does not fit in i32"))
-            .unwrap_or_else(|_| -1)
-            .await;
-          RecordBuf::from(Record { result, ..record })[..].into()
-        };
-
-        Op::Async(fut.boxed_local())
+      let fut = async move {
+        let op = handler(state, record.rid, zero_copy_buf);
+        let result = op
+          .map_ok(|r| r.try_into().expect("op result does not fit in i32"))
+          .unwrap_or_else(|_| -1)
+          .await;
+        RecordBuf::from(Record { result, ..record })[..].into()
       };
+
+      Op::Async(fut.boxed_local())
+    };
 
     self.core_isolate.register_op(name, core_handler);
   }

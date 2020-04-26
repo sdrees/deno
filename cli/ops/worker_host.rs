@@ -11,12 +11,15 @@ use crate::tokio_util::create_basic_runtime;
 use crate::web_worker::WebWorker;
 use crate::web_worker::WebWorkerHandle;
 use crate::worker::WorkerEvent;
-use deno_core::*;
+use deno_core::CoreIsolate;
+use deno_core::ErrBox;
+use deno_core::ModuleSpecifier;
+use deno_core::ZeroCopyBuf;
 use futures::future::FutureExt;
 use std::convert::From;
 use std::thread::JoinHandle;
 
-pub fn init(i: &mut Isolate, s: &State) {
+pub fn init(i: &mut CoreIsolate, s: &State) {
   i.register_op("op_create_worker", s.stateful_json_op(op_create_worker));
   i.register_op(
     "op_host_terminate_worker",
@@ -43,14 +46,6 @@ fn create_web_worker(
   let state =
     State::new_for_worker(global_state, Some(permissions), specifier)?;
 
-  if has_deno_namespace {
-    let mut s = state.borrow_mut();
-    let (stdin, stdout, stderr) = get_stdio();
-    s.resource_table.add("stdin", Box::new(stdin));
-    s.resource_table.add("stdout", Box::new(stdout));
-    s.resource_table.add("stderr", Box::new(stderr));
-  }
-
   let mut worker = WebWorker::new(
     name.clone(),
     startup_data::deno_isolate_init(),
@@ -58,10 +53,18 @@ fn create_web_worker(
     has_deno_namespace,
   );
 
+  if has_deno_namespace {
+    let mut resource_table = worker.resource_table.borrow_mut();
+    let (stdin, stdout, stderr) = get_stdio();
+    resource_table.add("stdin", Box::new(stdin));
+    resource_table.add("stdout", Box::new(stdout));
+    resource_table.add("stderr", Box::new(stderr));
+  }
+
   // Instead of using name for log we use `worker-${id}` because
   // WebWorkers can have empty string as name.
   let script = format!(
-    "bootstrapWorkerRuntime(\"{}\", {}, \"worker-{}\")",
+    "bootstrap.workerRuntime(\"{}\", {}, \"worker-{}\")",
     name, worker.has_deno_namespace, worker_id
   );
   worker.execute(&script)?;
