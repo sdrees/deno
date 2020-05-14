@@ -11,10 +11,10 @@ use crate::global_state::GlobalState;
 use crate::msg;
 use crate::op_error::OpError;
 use crate::ops;
+use crate::permissions::Permissions;
 use crate::source_maps::SourceMapGetter;
 use crate::startup_data;
 use crate::state::State;
-use crate::state::*;
 use crate::tokio_util;
 use crate::version;
 use crate::web_worker::WebWorker;
@@ -32,6 +32,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::json;
 use serde_json::Value;
+use sourcemap::SourceMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -343,11 +344,14 @@ impl TsCompiler {
 
   /// Create a new V8 worker with snapshot of TS compiler and setup compiler's
   /// runtime.
-  fn setup_worker(global_state: GlobalState) -> CompilerWorker {
+  fn setup_worker(
+    global_state: GlobalState,
+    permissions: Permissions,
+  ) -> CompilerWorker {
     let entry_point =
       ModuleSpecifier::resolve_url_or_path("./__$deno$ts_compiler.ts").unwrap();
     let worker_state =
-      State::new(global_state.clone(), None, entry_point, DebugType::Internal)
+      State::new(global_state.clone(), Some(permissions), entry_point, true)
         .expect("Unable to create worker state");
 
     // Count how many times we start the compiler worker.
@@ -384,7 +388,9 @@ impl TsCompiler {
       global_state.flags.unstable,
     );
 
-    let msg = execute_in_thread(global_state.clone(), req_msg).await?;
+    let permissions = Permissions::allow_all();
+    let msg =
+      execute_in_thread(global_state.clone(), permissions, req_msg).await?;
     let json_str = std::str::from_utf8(&msg).unwrap();
     debug!("Message: {}", json_str);
 
@@ -440,6 +446,7 @@ impl TsCompiler {
     global_state: GlobalState,
     source_file: &SourceFile,
     target: TargetLib,
+    permissions: Permissions,
   ) -> Result<CompiledModule, ErrBox> {
     if self.has_compiled(&source_file.url) {
       return self.get_compiled_module(&source_file.url);
@@ -492,7 +499,8 @@ impl TsCompiler {
       module_url.to_string()
     );
 
-    let msg = execute_in_thread(global_state.clone(), req_msg).await?;
+    let msg =
+      execute_in_thread(global_state.clone(), permissions, req_msg).await?;
     let json_str = std::str::from_utf8(&msg).unwrap();
 
     let compile_response: CompileResponse = serde_json::from_str(json_str)?;
@@ -597,7 +605,7 @@ impl TsCompiler {
   ) -> std::io::Result<()> {
     let source_file = self
       .file_fetcher
-      .fetch_cached_source_file(&module_specifier)
+      .fetch_cached_source_file(&module_specifier, Permissions::allow_all())
       .expect("Source file not found");
 
     // NOTE: JavaScript files are only cached to disk if `checkJs`
@@ -607,11 +615,42 @@ impl TsCompiler {
       return Ok(());
     }
 
+    // By default TSC output source map url that is relative; we need
+    // to substitute it manually to correct file URL in DENO_DIR.
+    let mut content_lines = contents
+      .split('\n')
+      .map(|s| s.to_string())
+      .collect::<Vec<String>>();
+
+    if !content_lines.is_empty() {
+      let last_line = content_lines.pop().unwrap();
+      if last_line.starts_with("//# sourceMappingURL=") {
+        let source_map_key = self.disk_cache.get_cache_filename_with_extension(
+          module_specifier.as_url(),
+          "js.map",
+        );
+        let source_map_path = self.disk_cache.location.join(source_map_key);
+        let source_map_file_url = Url::from_file_path(source_map_path)
+          .expect("Bad file URL for source map");
+        let new_last_line =
+          format!("//# sourceMappingURL={}", source_map_file_url.to_string());
+        content_lines.push(new_last_line);
+      } else {
+        content_lines.push(last_line);
+      }
+    }
+
+    let contents = content_lines.join("\n");
+
     let js_key = self
       .disk_cache
       .get_cache_filename_with_extension(module_specifier.as_url(), "js");
     self.disk_cache.set(&js_key, contents.as_bytes())?;
     self.mark_compiled(module_specifier.as_url());
+    let source_file = self
+      .file_fetcher
+      .fetch_cached_source_file(&module_specifier, Permissions::allow_all())
+      .expect("Source file not found");
 
     let version_hash = source_code_version_hash(
       &source_file.source_code,
@@ -665,7 +704,7 @@ impl TsCompiler {
   ) -> std::io::Result<()> {
     let source_file = self
       .file_fetcher
-      .fetch_cached_source_file(&module_specifier)
+      .fetch_cached_source_file(&module_specifier, Permissions::allow_all())
       .expect("Source file not found");
 
     // NOTE: JavaScript files are only cached to disk if `checkJs`
@@ -675,10 +714,27 @@ impl TsCompiler {
       return Ok(());
     }
 
+    let js_key = self
+      .disk_cache
+      .get_cache_filename_with_extension(module_specifier.as_url(), "js");
+    let js_path = self.disk_cache.location.join(js_key);
+    let js_file_url =
+      Url::from_file_path(js_path).expect("Bad file URL for file");
+
     let source_map_key = self
       .disk_cache
       .get_cache_filename_with_extension(module_specifier.as_url(), "js.map");
-    self.disk_cache.set(&source_map_key, contents.as_bytes())
+
+    let mut sm = SourceMap::from_slice(contents.as_bytes())
+      .expect("Invalid source map content");
+    sm.set_file(Some(&js_file_url.to_string()));
+    sm.set_source(0, &module_specifier.to_string());
+
+    let mut output: Vec<u8> = vec![];
+    sm.to_writer(&mut output)
+      .expect("Failed to write source map");
+
+    self.disk_cache.set(&source_map_key, &output)
   }
 }
 
@@ -720,7 +776,7 @@ impl TsCompiler {
     if let Some(module_specifier) = self.try_to_resolve(script_name) {
       return self
         .file_fetcher
-        .fetch_cached_source_file(&module_specifier);
+        .fetch_cached_source_file(&module_specifier, Permissions::allow_all());
     }
 
     None
@@ -743,6 +799,7 @@ impl TsCompiler {
 
 async fn execute_in_thread(
   global_state: GlobalState,
+  permissions: Permissions,
   req: Buf,
 ) -> Result<Buf, ErrBox> {
   let (handle_sender, handle_receiver) =
@@ -750,7 +807,7 @@ async fn execute_in_thread(
   let builder =
     std::thread::Builder::new().name("deno-ts-compiler".to_string());
   let join_handle = builder.spawn(move || {
-    let worker = TsCompiler::setup_worker(global_state.clone());
+    let worker = TsCompiler::setup_worker(global_state.clone(), permissions);
     handle_sender.send(Ok(worker.thread_safe_handle())).unwrap();
     drop(handle_sender);
     tokio_util::run_basic(worker).expect("Panic in event loop");
@@ -772,6 +829,7 @@ async fn execute_in_thread(
 /// This function is used by `Deno.compile()` and `Deno.bundle()` APIs.
 pub async fn runtime_compile<S: BuildHasher>(
   global_state: GlobalState,
+  permissions: Permissions,
   root_name: &str,
   sources: &Option<HashMap<String, String, S>>,
   bundle: bool,
@@ -792,7 +850,7 @@ pub async fn runtime_compile<S: BuildHasher>(
 
   let compiler = global_state.ts_compiler.clone();
 
-  let msg = execute_in_thread(global_state, req_msg).await?;
+  let msg = execute_in_thread(global_state, permissions, req_msg).await?;
   let json_str = std::str::from_utf8(&msg).unwrap();
 
   // TODO(bartlomieju): factor `bundle` path into separate function `runtime_bundle`
@@ -816,6 +874,7 @@ pub async fn runtime_compile<S: BuildHasher>(
 /// This function is used by `Deno.transpileOnly()` API.
 pub async fn runtime_transpile<S: BuildHasher>(
   global_state: GlobalState,
+  permissions: Permissions,
   sources: &HashMap<String, String, S>,
   options: &Option<String>,
 ) -> Result<Value, OpError> {
@@ -828,7 +887,7 @@ pub async fn runtime_transpile<S: BuildHasher>(
   .into_boxed_str()
   .into_boxed_bytes();
 
-  let msg = execute_in_thread(global_state, req_msg).await?;
+  let msg = execute_in_thread(global_state, permissions, req_msg).await?;
   let json_str = std::str::from_utf8(&msg).unwrap();
   let v = serde_json::from_str::<serde_json::Value>(json_str)
     .expect("Error decoding JSON string.");
@@ -859,17 +918,48 @@ mod tests {
       types_url: None,
     };
     let mock_state =
-      GlobalState::mock(vec![String::from("deno"), String::from("hello.js")]);
+      GlobalState::mock(vec![String::from("deno"), String::from("hello.ts")]);
     let result = mock_state
       .ts_compiler
-      .compile(mock_state.clone(), &out, TargetLib::Main)
+      .compile(
+        mock_state.clone(),
+        &out,
+        TargetLib::Main,
+        Permissions::allow_all(),
+      )
       .await;
     assert!(result.is_ok());
-    assert!(result
-      .unwrap()
-      .code
+    let source_code = result.unwrap().code;
+    assert!(source_code
       .as_bytes()
       .starts_with(b"\"use strict\";\nconsole.log(\"Hello World\");"));
+    let mut lines: Vec<String> =
+      source_code.split('\n').map(|s| s.to_string()).collect();
+    let last_line = lines.pop().unwrap();
+    assert!(last_line.starts_with("//# sourceMappingURL=file://"));
+
+    // Get source map file and assert it has proper URLs
+    let source_map = mock_state
+      .ts_compiler
+      .get_source_map_file(&specifier)
+      .expect("Source map not found");
+    let source_str = String::from_utf8(source_map.source_code).unwrap();
+    let source_json: Value = serde_json::from_str(&source_str).unwrap();
+
+    let js_key = mock_state
+      .ts_compiler
+      .disk_cache
+      .get_cache_filename_with_extension(specifier.as_url(), "js");
+    let js_path = mock_state.ts_compiler.disk_cache.location.join(js_key);
+    let js_file_url = Url::from_file_path(js_path).unwrap();
+
+    let file_str = source_json.get("file").unwrap().as_str().unwrap();
+    assert_eq!(file_str, js_file_url.to_string());
+
+    let sources = source_json.get("sources").unwrap().as_array().unwrap();
+    assert_eq!(sources.len(), 1);
+    let source = sources.get(0).unwrap().as_str().unwrap();
+    assert_eq!(source, specifier.to_string());
   }
 
   #[tokio::test]

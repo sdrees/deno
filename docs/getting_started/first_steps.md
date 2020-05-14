@@ -29,9 +29,9 @@ deno run https://deno.land/std/examples/welcome.ts
 
 ### Making an HTTP request
 
-Something a lot of programs do is fetching data from from a webserver via an
-HTTP request. Lets write a small program that fetches a file and prints the
-content to the terminal.
+Something a lot of programs do is fetching data from a webserver via an HTTP
+request. Lets write a small program that fetches a file and prints the content
+to the terminal.
 
 Just like in the browser you can use the web standard
 [`fetch`](https://developer.mozilla.org/en-US/docs/Web/API/Fetch_API) API to
@@ -96,8 +96,8 @@ for (let i = 0; i < Deno.args.length; i++) {
 }
 ```
 
-The `copy()` function here actually makes no more than the necessary kernel ->
-userspace -> kernel copies. That is, the same memory from which data is read
+The `copy()` function here actually makes no more than the necessary
+kernel→userspace→kernel copies. That is, the same memory from which data is read
 from the file, is written to stdout. This illustrates a general design goal for
 I/O streams in Deno.
 
@@ -124,7 +124,7 @@ For security reasons, Deno does not allow programs to access the network without
 explicit permission. To allow accessing the network, use a command-line flag:
 
 ```shell
-$ deno run --allow-net https://deno.land/std/examples/echo_server.ts
+deno run --allow-net https://deno.land/std/examples/echo_server.ts
 ```
 
 To test it, try sending data to it with netcat:
