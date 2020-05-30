@@ -1,5 +1,4 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
-use crate::fs::resolve_from_cwd;
 use clap::App;
 use clap::AppSettings;
 use clap::Arg;
@@ -7,7 +6,7 @@ use clap::ArgMatches;
 use clap::SubCommand;
 use log::Level;
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// Creates vector of strings, Vec<String>
 macro_rules! svec {
@@ -184,7 +183,7 @@ static ENV_VARIABLES_HELP: &str = "ENVIRONMENT VARIABLES:
 
 static DENO_HELP: &str = "A secure JavaScript and TypeScript runtime
 
-Docs: https://deno.land/std/manual.md
+Docs: https://deno.land/manual
 Modules: https://deno.land/std/ https://deno.land/x/
 Bugs: https://github.com/denoland/deno/issues
 
@@ -470,13 +469,6 @@ fn lock_args_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   if matches.is_present("lock-write") {
     flags.lock_write = true;
   }
-}
-
-fn resolve_fs_whitelist(whitelist: &[PathBuf]) -> Vec<PathBuf> {
-  whitelist
-    .iter()
-    .map(|raw_path| resolve_from_cwd(Path::new(&raw_path)).unwrap())
-    .collect()
 }
 
 // Shared between the run and test subcommands. They both take similar options.
@@ -1030,7 +1022,7 @@ report results to standard output:
   deno test src/fetch_test.ts src/signal_test.ts
 
 Directory arguments are expanded to all contained files matching the glob
-{*_,}test.{js,ts,jsx,tsx}:
+{*_,*.,}test.{js,ts,jsx,tsx}:
   deno test src/",
     )
 }
@@ -1173,16 +1165,15 @@ fn reload_arg<'a, 'b>() -> Arg<'a, 'b> {
 }
 
 fn reload_arg_parse(flags: &mut Flags, matches: &ArgMatches) {
-  if matches.is_present("reload") {
-    if matches.value_of("reload").is_some() {
-      let cache_bl = matches.values_of("reload").unwrap();
-      let raw_cache_blacklist: Vec<String> =
-        cache_bl.map(std::string::ToString::to_string).collect();
+  if let Some(cache_bl) = matches.values_of("reload") {
+    let raw_cache_blacklist: Vec<String> =
+      cache_bl.map(std::string::ToString::to_string).collect();
+    if raw_cache_blacklist.is_empty() {
+      flags.reload = true;
+    } else {
       flags.cache_blacklist = resolve_urls(raw_cache_blacklist);
       debug!("cache blacklist: {:#?}", &flags.cache_blacklist);
       flags.reload = false;
-    } else {
-      flags.reload = true;
     }
   }
 }
@@ -1195,7 +1186,7 @@ fn importmap_arg<'a, 'b>() -> Arg<'a, 'b> {
     .long_help(
       "UNSTABLE:
 Load import map file
-Docs: https://deno.land/std/manual.md#import-maps
+Docs: https://deno.land/manual/linking_to_external_code/import_maps
 Specification: https://wicg.github.io/import-maps/
 Examples: https://github.com/WICG/import-maps#the-import-map",
     )
@@ -1235,39 +1226,37 @@ fn no_remote_arg_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
 }
 
 fn permission_args_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
-  if matches.is_present("allow-read") {
-    if matches.value_of("allow-read").is_some() {
-      let read_wl = matches.values_of("allow-read").unwrap();
-      let raw_read_whitelist: Vec<PathBuf> =
-        read_wl.map(PathBuf::from).collect();
-      flags.read_whitelist = resolve_fs_whitelist(&raw_read_whitelist);
-      debug!("read whitelist: {:#?}", &flags.read_whitelist);
-    } else {
+  if let Some(read_wl) = matches.values_of("allow-read") {
+    let read_whitelist: Vec<PathBuf> = read_wl.map(PathBuf::from).collect();
+
+    if read_whitelist.is_empty() {
       flags.allow_read = true;
-    }
-  }
-  if matches.is_present("allow-write") {
-    if matches.value_of("allow-write").is_some() {
-      let write_wl = matches.values_of("allow-write").unwrap();
-      let raw_write_whitelist: Vec<PathBuf> =
-        write_wl.map(PathBuf::from).collect();
-      flags.write_whitelist = resolve_fs_whitelist(&raw_write_whitelist);
-      debug!("write whitelist: {:#?}", &flags.write_whitelist);
     } else {
-      flags.allow_write = true;
+      flags.read_whitelist = read_whitelist;
     }
   }
-  if matches.is_present("allow-net") {
-    if matches.value_of("allow-net").is_some() {
-      let net_wl = matches.values_of("allow-net").unwrap();
-      let raw_net_whitelist =
-        net_wl.map(std::string::ToString::to_string).collect();
+
+  if let Some(write_wl) = matches.values_of("allow-write") {
+    let write_whitelist: Vec<PathBuf> = write_wl.map(PathBuf::from).collect();
+
+    if write_whitelist.is_empty() {
+      flags.allow_write = true;
+    } else {
+      flags.write_whitelist = write_whitelist;
+    }
+  }
+
+  if let Some(net_wl) = matches.values_of("allow-net") {
+    let raw_net_whitelist: Vec<String> =
+      net_wl.map(std::string::ToString::to_string).collect();
+    if raw_net_whitelist.is_empty() {
+      flags.allow_net = true;
+    } else {
       flags.net_whitelist = resolve_hosts(raw_net_whitelist);
       debug!("net whitelist: {:#?}", &flags.net_whitelist);
-    } else {
-      flags.allow_net = true;
     }
   }
+
   if matches.is_present("allow-env") {
     flags.allow_env = true;
   }
@@ -1352,7 +1341,6 @@ fn resolve_hosts(paths: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::env::current_dir;
 
   #[test]
   fn upgrade() {
@@ -1853,7 +1841,7 @@ mod tests {
       r.unwrap(),
       Flags {
         allow_read: false,
-        read_whitelist: vec![current_dir().unwrap(), temp_dir],
+        read_whitelist: vec![PathBuf::from("."), temp_dir],
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
@@ -1877,7 +1865,7 @@ mod tests {
       r.unwrap(),
       Flags {
         allow_write: false,
-        write_whitelist: vec![current_dir().unwrap(), temp_dir],
+        write_whitelist: vec![PathBuf::from("."), temp_dir],
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },

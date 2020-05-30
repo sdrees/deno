@@ -54,7 +54,9 @@ fn create_web_worker(
   );
 
   if has_deno_namespace {
-    let mut resource_table = worker.resource_table.borrow_mut();
+    let state_rc = CoreIsolate::state(&worker.isolate);
+    let state = state_rc.borrow();
+    let mut resource_table = state.resource_table.borrow_mut();
     let (stdin, stdout, stderr) = get_stdio();
     resource_table.add("stdin", Box::new(stdin));
     resource_table.add("stdout", Box::new(stdout));
@@ -306,7 +308,7 @@ fn op_host_get_message(
   };
   let state_ = state.clone();
   let op = async move {
-    let response = match worker_handle.get_event().await {
+    let response = match worker_handle.get_event().await? {
       Some(event) => {
         // Terminal error means that worker should be removed from worker table.
         if let WorkerEvent::TerminalError(_) = &event {
