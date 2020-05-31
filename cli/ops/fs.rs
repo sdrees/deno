@@ -417,8 +417,11 @@ fn op_remove(
           std::fs::remove_file(&path)?;
         }
       }
-    } else {
+    } else if file_type.is_dir() {
       std::fs::remove_dir(&path)?;
+    } else {
+      // pipes, sockets, etc...
+      std::fs::remove_file(&path)?;
     }
     Ok(json!({}))
   })
@@ -929,8 +932,8 @@ fn op_make_temp_file(
 struct UtimeArgs {
   promise_id: Option<u64>,
   path: String,
-  atime: u64,
-  mtime: u64,
+  atime: i64,
+  mtime: i64,
 }
 
 fn op_utime(
