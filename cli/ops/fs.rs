@@ -22,6 +22,9 @@ use rand::{thread_rng, Rng};
 pub fn init(i: &mut CoreIsolate, s: &State) {
   i.register_op("op_open", s.stateful_json_op2(op_open));
   i.register_op("op_seek", s.stateful_json_op2(op_seek));
+  i.register_op("op_fdatasync", s.stateful_json_op2(op_fdatasync));
+  i.register_op("op_fsync", s.stateful_json_op2(op_fsync));
+  i.register_op("op_fstat", s.stateful_json_op2(op_fstat));
   i.register_op("op_umask", s.stateful_json_op(op_umask));
   i.register_op("op_chdir", s.stateful_json_op(op_chdir));
   i.register_op("op_mkdir", s.stateful_json_op(op_mkdir));
@@ -36,6 +39,7 @@ pub fn init(i: &mut CoreIsolate, s: &State) {
   i.register_op("op_link", s.stateful_json_op(op_link));
   i.register_op("op_symlink", s.stateful_json_op(op_symlink));
   i.register_op("op_read_link", s.stateful_json_op(op_read_link));
+  i.register_op("op_ftruncate", s.stateful_json_op2(op_ftruncate));
   i.register_op("op_truncate", s.stateful_json_op(op_truncate));
   i.register_op("op_make_temp_dir", s.stateful_json_op(op_make_temp_dir));
   i.register_op("op_make_temp_file", s.stateful_json_op(op_make_temp_file));
@@ -72,7 +76,7 @@ fn op_open(
   isolate_state: &mut CoreIsolateState,
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: OpenArgs = serde_json::from_value(args)?;
   let path = Path::new(&args.path).to_path_buf();
@@ -147,7 +151,7 @@ fn op_open(
 struct SeekArgs {
   promise_id: Option<u64>,
   rid: i32,
-  offset: i32,
+  offset: i64,
   whence: i32,
 }
 
@@ -155,7 +159,7 @@ fn op_seek(
   isolate_state: &mut CoreIsolateState,
   _state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   use std::io::{Seek, SeekFrom};
   let args: SeekArgs = serde_json::from_value(args)?;
@@ -165,8 +169,8 @@ fn op_seek(
   // Translate seek mode to Rust repr.
   let seek_from = match whence {
     0 => SeekFrom::Start(offset as u64),
-    1 => SeekFrom::Current(i64::from(offset)),
-    2 => SeekFrom::End(i64::from(offset)),
+    1 => SeekFrom::Current(offset),
+    2 => SeekFrom::End(offset),
     _ => {
       return Err(OpError::type_error(format!(
         "Invalid seek mode: {}",
@@ -205,6 +209,139 @@ fn op_seek(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FdatasyncArgs {
+  promise_id: Option<u64>,
+  rid: i32,
+}
+
+fn op_fdatasync(
+  isolate_state: &mut CoreIsolateState,
+  state: &State,
+  args: Value,
+  _zero_copy: &mut [ZeroCopyBuf],
+) -> Result<JsonOp, OpError> {
+  state.check_unstable("Deno.fdatasync");
+  let args: FdatasyncArgs = serde_json::from_value(args)?;
+  let rid = args.rid as u32;
+
+  let resource_table = isolate_state.resource_table.clone();
+  let is_sync = args.promise_id.is_none();
+
+  if is_sync {
+    let mut resource_table = resource_table.borrow_mut();
+    std_file_resource(&mut resource_table, rid, |r| match r {
+      Ok(std_file) => std_file.sync_data().map_err(OpError::from),
+      Err(_) => Err(OpError::type_error(
+        "cannot sync this type of resource".to_string(),
+      )),
+    })?;
+    Ok(JsonOp::Sync(json!({})))
+  } else {
+    let fut = async move {
+      let mut resource_table = resource_table.borrow_mut();
+      std_file_resource(&mut resource_table, rid, |r| match r {
+        Ok(std_file) => std_file.sync_data().map_err(OpError::from),
+        Err(_) => Err(OpError::type_error(
+          "cannot sync this type of resource".to_string(),
+        )),
+      })?;
+      Ok(json!({}))
+    };
+    Ok(JsonOp::Async(fut.boxed_local()))
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FsyncArgs {
+  promise_id: Option<u64>,
+  rid: i32,
+}
+
+fn op_fsync(
+  isolate_state: &mut CoreIsolateState,
+  state: &State,
+  args: Value,
+  _zero_copy: &mut [ZeroCopyBuf],
+) -> Result<JsonOp, OpError> {
+  state.check_unstable("Deno.fsync");
+  let args: FsyncArgs = serde_json::from_value(args)?;
+  let rid = args.rid as u32;
+
+  let resource_table = isolate_state.resource_table.clone();
+  let is_sync = args.promise_id.is_none();
+
+  if is_sync {
+    let mut resource_table = resource_table.borrow_mut();
+    std_file_resource(&mut resource_table, rid, |r| match r {
+      Ok(std_file) => std_file.sync_all().map_err(OpError::from),
+      Err(_) => Err(OpError::type_error(
+        "cannot sync this type of resource".to_string(),
+      )),
+    })?;
+    Ok(JsonOp::Sync(json!({})))
+  } else {
+    let fut = async move {
+      let mut resource_table = resource_table.borrow_mut();
+      std_file_resource(&mut resource_table, rid, |r| match r {
+        Ok(std_file) => std_file.sync_all().map_err(OpError::from),
+        Err(_) => Err(OpError::type_error(
+          "cannot sync this type of resource".to_string(),
+        )),
+      })?;
+      Ok(json!({}))
+    };
+    Ok(JsonOp::Async(fut.boxed_local()))
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FstatArgs {
+  promise_id: Option<u64>,
+  rid: i32,
+}
+
+fn op_fstat(
+  isolate_state: &mut CoreIsolateState,
+  state: &State,
+  args: Value,
+  _zero_copy: &mut [ZeroCopyBuf],
+) -> Result<JsonOp, OpError> {
+  state.check_unstable("Deno.fstat");
+  let args: FstatArgs = serde_json::from_value(args)?;
+  let rid = args.rid as u32;
+
+  let resource_table = isolate_state.resource_table.clone();
+  let is_sync = args.promise_id.is_none();
+
+  if is_sync {
+    let mut resource_table = resource_table.borrow_mut();
+    let metadata = std_file_resource(&mut resource_table, rid, |r| match r {
+      Ok(std_file) => std_file.metadata().map_err(OpError::from),
+      Err(_) => Err(OpError::type_error(
+        "cannot stat this type of resource".to_string(),
+      )),
+    })?;
+    Ok(JsonOp::Sync(get_stat_json(metadata).unwrap()))
+  } else {
+    let fut = async move {
+      let mut resource_table = resource_table.borrow_mut();
+      let metadata =
+        std_file_resource(&mut resource_table, rid, |r| match r {
+          Ok(std_file) => std_file.metadata().map_err(OpError::from),
+          Err(_) => Err(OpError::type_error(
+            "cannot stat this type of resource".to_string(),
+          )),
+        })?;
+      Ok(get_stat_json(metadata).unwrap())
+    };
+    Ok(JsonOp::Async(fut.boxed_local()))
+  }
+}
+
+#[derive(Deserialize)]
 struct UmaskArgs {
   mask: Option<u32>,
 }
@@ -212,7 +349,7 @@ struct UmaskArgs {
 fn op_umask(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   state.check_unstable("Deno.umask");
   let args: UmaskArgs = serde_json::from_value(args)?;
@@ -250,7 +387,7 @@ struct ChdirArgs {
 fn op_chdir(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: ChdirArgs = serde_json::from_value(args)?;
   let d = PathBuf::from(&args.directory);
@@ -271,7 +408,7 @@ struct MkdirArgs {
 fn op_mkdir(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: MkdirArgs = serde_json::from_value(args)?;
   let path = Path::new(&args.path).to_path_buf();
@@ -305,7 +442,7 @@ struct ChmodArgs {
 fn op_chmod(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: ChmodArgs = serde_json::from_value(args)?;
   let path = Path::new(&args.path).to_path_buf();
@@ -345,7 +482,7 @@ struct ChownArgs {
 fn op_chown(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: ChownArgs = serde_json::from_value(args)?;
   let path = Path::new(&args.path).to_path_buf();
@@ -384,7 +521,7 @@ struct RemoveArgs {
 fn op_remove(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: RemoveArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -438,7 +575,7 @@ struct CopyFileArgs {
 fn op_copy_file(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: CopyFileArgs = serde_json::from_value(args)?;
   let from = PathBuf::from(&args.from);
@@ -532,7 +669,7 @@ struct StatArgs {
 fn op_stat(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: StatArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -562,7 +699,7 @@ struct RealpathArgs {
 fn op_realpath(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: RealpathArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -597,7 +734,7 @@ struct ReadDirArgs {
 fn op_read_dir(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: ReadDirArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -640,7 +777,7 @@ struct RenameArgs {
 fn op_rename(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: RenameArgs = serde_json::from_value(args)?;
   let oldpath = PathBuf::from(&args.oldpath);
@@ -669,7 +806,7 @@ struct LinkArgs {
 fn op_link(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   state.check_unstable("Deno.link");
   let args: LinkArgs = serde_json::from_value(args)?;
@@ -707,7 +844,7 @@ struct SymlinkOptions {
 fn op_symlink(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   state.check_unstable("Deno.symlink");
   let args: SymlinkArgs = serde_json::from_value(args)?;
@@ -767,7 +904,7 @@ struct ReadLinkArgs {
 fn op_read_link(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: ReadLinkArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -785,6 +922,52 @@ fn op_read_link(
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct FtruncateArgs {
+  promise_id: Option<u64>,
+  rid: i32,
+  len: i32,
+}
+
+fn op_ftruncate(
+  isolate_state: &mut CoreIsolateState,
+  state: &State,
+  args: Value,
+  _zero_copy: &mut [ZeroCopyBuf],
+) -> Result<JsonOp, OpError> {
+  state.check_unstable("Deno.ftruncate");
+  let args: FtruncateArgs = serde_json::from_value(args)?;
+  let rid = args.rid as u32;
+  let len = args.len as u64;
+
+  let resource_table = isolate_state.resource_table.clone();
+  let is_sync = args.promise_id.is_none();
+
+  if is_sync {
+    let mut resource_table = resource_table.borrow_mut();
+    std_file_resource(&mut resource_table, rid, |r| match r {
+      Ok(std_file) => std_file.set_len(len).map_err(OpError::from),
+      Err(_) => Err(OpError::type_error(
+        "cannot truncate this type of resource".to_string(),
+      )),
+    })?;
+    Ok(JsonOp::Sync(json!({})))
+  } else {
+    let fut = async move {
+      let mut resource_table = resource_table.borrow_mut();
+      std_file_resource(&mut resource_table, rid, |r| match r {
+        Ok(std_file) => std_file.set_len(len).map_err(OpError::from),
+        Err(_) => Err(OpError::type_error(
+          "cannot truncate this type of resource".to_string(),
+        )),
+      })?;
+      Ok(json!({}))
+    };
+    Ok(JsonOp::Async(fut.boxed_local()))
+  }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct TruncateArgs {
   promise_id: Option<u64>,
   path: String,
@@ -794,7 +977,7 @@ struct TruncateArgs {
 fn op_truncate(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: TruncateArgs = serde_json::from_value(args)?;
   let path = PathBuf::from(&args.path);
@@ -868,7 +1051,7 @@ struct MakeTempArgs {
 fn op_make_temp_dir(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: MakeTempArgs = serde_json::from_value(args)?;
 
@@ -899,7 +1082,7 @@ fn op_make_temp_dir(
 fn op_make_temp_file(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: MakeTempArgs = serde_json::from_value(args)?;
 
@@ -939,7 +1122,7 @@ struct UtimeArgs {
 fn op_utime(
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   state.check_unstable("Deno.utime");
 
@@ -959,7 +1142,7 @@ fn op_utime(
 fn op_cwd(
   state: &State,
   _args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let path = current_dir()?;
   state.check_read_blind(&path, "CWD")?;

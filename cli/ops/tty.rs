@@ -50,7 +50,7 @@ pub fn op_set_raw(
   isolate_state: &mut CoreIsolateState,
   state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   state.check_unstable("Deno.setRaw");
   let args: SetRawArgs = serde_json::from_value(args)?;
@@ -77,7 +77,7 @@ pub fn op_set_raw(
 
     // For now, only stdin.
     let handle = match &mut resource_holder.resource {
-      StreamResource::Stdin(_, _) => std::io::stdin().as_raw_handle(),
+      StreamResource::Stdin(..) => std::io::stdin().as_raw_handle(),
       StreamResource::FsFile(ref mut option_file_metadata) => {
         if let Some((tokio_file, metadata)) = option_file_metadata.take() {
           match tokio_file.try_into_std() {
@@ -219,7 +219,7 @@ pub fn op_isatty(
   isolate_state: &mut CoreIsolateState,
   _state: &State,
   args: Value,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<JsonOp, OpError> {
   let args: IsattyArgs = serde_json::from_value(args)?;
   let rid = args.rid;
@@ -245,7 +245,7 @@ pub fn op_isatty(
         }
       }
       Err(StreamResource::FsFile(_)) => unreachable!(),
-      Err(StreamResource::Stdin(_, _)) => Ok(atty::is(atty::Stream::Stdin)),
+      Err(StreamResource::Stdin(..)) => Ok(atty::is(atty::Stream::Stdin)),
       _ => Ok(false),
     })?;
   Ok(JsonOp::Sync(json!(isatty)))

@@ -216,14 +216,18 @@ function groupEntries<T>(
       lineMaxLength += separatorSpace;
       maxLineLength[i] = lineMaxLength;
     }
-    let order = "padStart";
+    let order: "padStart" | "padEnd" = "padStart";
     if (value !== undefined) {
       for (let i = 0; i < entries.length; i++) {
-        //@ts-expect-error
-        if (typeof value[i] !== "number" && typeof value[i] !== "bigint") {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        if (
+          typeof (value as any)[i] !== "number" &&
+          typeof (value as any)[i] !== "bigint"
+        ) {
           order = "padEnd";
           break;
         }
+        /* eslint-enable */
       }
     }
     // Each iteration creates a single line of grouped entries.
@@ -235,7 +239,6 @@ function groupEntries<T>(
       for (; j < max - 1; j++) {
         // In future, colors should be taken here into the account
         const padding = maxLineLength[j - i];
-        //@ts-expect-error
         str += `${entries[j]}, `[order](padding, " ");
       }
       if (order === "padStart") {
@@ -297,6 +300,24 @@ function stringify(
   }
 }
 
+// We can match Node's quoting behavior exactly by swapping the double quote and
+// single quote in this array. That would give preference to single quotes.
+// However, we prefer double quotes as the default.
+const QUOTES = ['"', "'", "`"];
+
+/** Surround the string in quotes.
+ *
+ * The quote symbol is chosen by taking the first of the `QUOTES` array which
+ * does not occur in the string. If they all occur, settle with `QUOTES[0]`.
+ *
+ * Insert a backslash before any occurrence of the chosen quote symbol and
+ * before any backslash. */
+function quoteString(string: string): string {
+  const quote = QUOTES.find((c) => !string.includes(c)) ?? QUOTES[0];
+  const escapePattern = new RegExp(`(?=[${quote}\\\\])`, "g");
+  return `${quote}${string.replace(escapePattern, "\\")}${quote}`;
+}
+
 // Print strings when they are inside of arrays or objects with quotes
 function stringifyWithQuotes(
   value: unknown,
@@ -310,7 +331,7 @@ function stringifyWithQuotes(
         value.length > STR_ABBREVIATE_SIZE
           ? value.slice(0, STR_ABBREVIATE_SIZE) + "..."
           : value;
-      return green(`"${trunc}"`); // Quoted strings are green
+      return green(quoteString(trunc)); // Quoted strings are green
     default:
       return stringify(value, ctx, level, maxLevel);
   }
@@ -408,8 +429,8 @@ function createMapString(
     },
     group: false,
   };
-  //@ts-expect-error
-  return createIterableString(value, ctx, level, maxLevel, printConfig);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return createIterableString(value as any, ctx, level, maxLevel, printConfig);
 }
 
 function createWeakSetString(): string {
@@ -477,7 +498,7 @@ function createPromiseString(
 // TODO: Proxy
 
 function createRawObjectString(
-  value: { [key: string]: unknown },
+  value: Record<string, unknown>,
   ctx: ConsoleContext,
   level: number,
   maxLevel: number
@@ -490,8 +511,9 @@ function createRawObjectString(
   let baseString = "";
 
   let shouldShowDisplayName = false;
-  // @ts-expect-error
-  let displayName = value[Symbol.toStringTag];
+  let displayName = (value as { [Symbol.toStringTag]: string })[
+    Symbol.toStringTag
+  ];
   if (!displayName) {
     displayName = getClassInstanceName(value);
   }
@@ -511,8 +533,8 @@ function createRawObjectString(
   for (const key of symbolKeys) {
     entries.push(
       `${key.toString()}: ${stringifyWithQuotes(
-        // @ts-expect-error
-        value[key],
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        value[key as any],
         ctx,
         level + 1,
         maxLevel

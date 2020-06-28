@@ -25,10 +25,16 @@ unitTest(async function sendAsyncStackTrace(): Promise<void> {
   }
 });
 
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Deno {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    var core: any; // eslint-disable-line no-var
+  }
+}
+
 unitTest(function malformedMinimalControlBuffer(): void {
-  // @ts-expect-error
   const readOpId = Deno.core.ops()["op_read"];
-  // @ts-expect-error
   const res = Deno.core.send(readOpId, new Uint8Array([1, 2, 3, 4, 5]));
   const header = res.slice(0, 12);
   const buf32 = new Int32Array(

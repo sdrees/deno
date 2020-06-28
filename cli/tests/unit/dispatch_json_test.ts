@@ -19,14 +19,19 @@ unitTest(
   }
 );
 
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Deno {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    var core: any; // eslint-disable-line no-var
+  }
+}
+
 unitTest(function malformedJsonControlBuffer(): void {
-  // @ts-expect-error
   const opId = Deno.core.ops()["op_open"];
-  // @ts-expect-error
   const res = Deno.core.send(opId, new Uint8Array([1, 2, 3, 4, 5]));
   const resText = new TextDecoder().decode(res);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const resJson = JSON.parse(resText) as any;
+  const resJson = JSON.parse(resText);
   assert(!resJson.ok);
   assert(resJson.err);
 });
