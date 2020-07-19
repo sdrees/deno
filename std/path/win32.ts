@@ -2,7 +2,7 @@
 // Ported from https://github.com/browserify/path-browserify/
 /** This module is browser compatible. */
 
-import { FormatInputPathObject, ParsedPath } from "./_interface.ts";
+import type { FormatInputPathObject, ParsedPath } from "./_interface.ts";
 import {
   CHAR_DOT,
   CHAR_BACKWARD_SLASH,
@@ -167,7 +167,7 @@ export function resolve(...pathSegments: string[]): string {
     resolvedTail,
     !resolvedAbsolute,
     "\\",
-    isPathSeparator
+    isPathSeparator,
   );
 
   return resolvedDevice + (resolvedAbsolute ? "\\" : "") + resolvedTail || ".";
@@ -259,7 +259,7 @@ export function normalize(path: string): string {
       path.slice(rootEnd),
       !isAbsolute,
       "\\",
-      isPathSeparator
+      isPathSeparator,
     );
   } else {
     tail = "";
@@ -750,7 +750,7 @@ export function format(pathObject: FormatInputPathObject): string {
   /* eslint-disable max-len */
   if (pathObject === null || typeof pathObject !== "object") {
     throw new TypeError(
-      `The "pathObject" argument must be of type Object. Received type ${typeof pathObject}`
+      `The "pathObject" argument must be of type Object. Received type ${typeof pathObject}`,
     );
   }
   return _format("\\", pathObject);
@@ -914,7 +914,7 @@ export function parse(path: string): ParsedPath {
  * are ignored.
  */
 export function fromFileUrl(url: string | URL): string {
-  return new URL(url).pathname
+  return new URL(String(url)).pathname
     .replace(/^\/*([A-Za-z]:)(\/|$)/, "$1/")
     .replace(/\//g, "\\");
 }

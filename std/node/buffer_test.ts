@@ -22,7 +22,7 @@ Deno.test({
       },
       RangeError,
       "Invalid typed array length: -1",
-      "should throw on negative numbers"
+      "should throw on negative numbers",
     );
   },
 });
@@ -41,7 +41,7 @@ Deno.test({
         },
         TypeError,
         `The "size" argument must be of type number. Received type ${typeof size}`,
-        "should throw on non-number size"
+        "should throw on non-number size",
       );
     }
   },
@@ -62,7 +62,7 @@ Deno.test({
         },
         TypeError,
         `The argument "value" is invalid. Received ${value.constructor.name} []`,
-        "should throw for empty Buffer/Uint8Array"
+        "should throw for empty Buffer/Uint8Array",
       );
     }
   },
@@ -97,6 +97,22 @@ Deno.test({
 });
 
 Deno.test({
+  name: "allocUnsafe allocates a buffer with the expected size",
+  fn() {
+    const buffer: Buffer = Buffer.allocUnsafe(1);
+    assertEquals(buffer.length, 1, "Buffer size should be 1");
+  },
+});
+
+Deno.test({
+  name: "allocUnsafe(0) creates an empty buffer",
+  fn() {
+    const buffer: Buffer = Buffer.allocUnsafe(0);
+    assertEquals(buffer.length, 0, "Buffer size should be 0");
+  },
+});
+
+Deno.test({
   name: "alloc filled correctly with integer",
   fn() {
     const buffer: Buffer = Buffer.alloc(3, 5);
@@ -116,7 +132,7 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(11, "aGVsbG8gd29ybGQ=", "base64"),
-      new Uint8Array([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100])
+      new Uint8Array([104, 101, 108, 108, 111, 32, 119, 111, 114, 108, 100]),
     );
   },
 });
@@ -126,7 +142,7 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(4, "64656e6f", "hex"),
-      new Uint8Array([100, 101, 110, 111])
+      new Uint8Array([100, 101, 110, 111]),
     );
   },
 });
@@ -136,7 +152,7 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(13, "64656e6f", "hex").toString(),
-      "denodenodenod"
+      "denodenodenod",
     );
   },
 });
@@ -146,11 +162,11 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(7, new Uint8Array([100, 101])),
-      new Uint8Array([100, 101, 100, 101, 100, 101, 100])
+      new Uint8Array([100, 101, 100, 101, 100, 101, 100]),
     );
     assertEquals(
       Buffer.alloc(6, new Uint8Array([100, 101])),
-      new Uint8Array([100, 101, 100, 101, 100, 101])
+      new Uint8Array([100, 101, 100, 101, 100, 101]),
     );
   },
 });
@@ -160,7 +176,7 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(1, new Uint8Array([100, 101])),
-      new Uint8Array([100])
+      new Uint8Array([100]),
     );
   },
 });
@@ -170,19 +186,64 @@ Deno.test({
   fn() {
     assertEquals(
       Buffer.alloc(6, new Buffer([100, 101])),
-      new Uint8Array([100, 101, 100, 101, 100, 101])
+      new Uint8Array([100, 101, 100, 101, 100, 101]),
     );
     assertEquals(
       Buffer.alloc(7, new Buffer([100, 101])),
-      new Uint8Array([100, 101, 100, 101, 100, 101, 100])
+      new Uint8Array([100, 101, 100, 101, 100, 101, 100]),
     );
   },
 });
 
+// tests from:
+// https://github.com/nodejs/node/blob/56dbe466fdbc598baea3bfce289bf52b97b8b8f7/test/parallel/test-buffer-bytelength.js#L70
 Deno.test({
   name: "Byte length is the expected for strings",
   fn() {
-    assertEquals(Buffer.byteLength("test"), 4, "Byte lenght differs on string");
+    // Special case: zero length string
+    assertEquals(Buffer.byteLength("", "ascii"), 0);
+    assertEquals(Buffer.byteLength("", "HeX"), 0);
+
+    // utf8
+    assertEquals(Buffer.byteLength("∑éllö wørl∂!", "utf-8"), 19);
+    assertEquals(Buffer.byteLength("κλμνξο", "utf8"), 12);
+    assertEquals(Buffer.byteLength("挵挶挷挸挹", "utf-8"), 15);
+    assertEquals(Buffer.byteLength("𠝹𠱓𠱸", "UTF8"), 12);
+    // Without an encoding, utf8 should be assumed
+    assertEquals(Buffer.byteLength("hey there"), 9);
+    assertEquals(Buffer.byteLength("𠱸挶νξ#xx :)"), 17);
+    assertEquals(Buffer.byteLength("hello world", ""), 11);
+    // It should also be assumed with unrecognized encoding
+    assertEquals(Buffer.byteLength("hello world", "abc"), 11);
+    assertEquals(Buffer.byteLength("ßœ∑≈", "unkn0wn enc0ding"), 10);
+
+    // base64
+    assertEquals(Buffer.byteLength("aGVsbG8gd29ybGQ=", "base64"), 11);
+    assertEquals(Buffer.byteLength("aGVsbG8gd29ybGQ=", "BASE64"), 11);
+    assertEquals(Buffer.byteLength("bm9kZS5qcyByb2NrcyE=", "base64"), 14);
+    assertEquals(Buffer.byteLength("aGkk", "base64"), 3);
+    assertEquals(
+      Buffer.byteLength("bHNrZGZsa3NqZmtsc2xrZmFqc2RsZmtqcw==", "base64"),
+      25,
+    );
+    // special padding
+    assertEquals(Buffer.byteLength("aaa=", "base64"), 2);
+    assertEquals(Buffer.byteLength("aaaa==", "base64"), 3);
+
+    assertEquals(Buffer.byteLength("Il était tué"), 14);
+    assertEquals(Buffer.byteLength("Il était tué", "utf8"), 14);
+
+    ["ascii", "latin1", "binary"]
+      .reduce((es: string[], e: string) => es.concat(e, e.toUpperCase()), [])
+      .forEach((encoding: string) => {
+        assertEquals(Buffer.byteLength("Il était tué", encoding), 12);
+      });
+
+    ["ucs2", "ucs-2", "utf16le", "utf-16le"]
+      .reduce((es: string[], e: string) => es.concat(e, e.toUpperCase()), [])
+      .forEach((encoding: string) => {
+        assertEquals(Buffer.byteLength("Il était tué", encoding), 24);
+      });
   },
 });
 
@@ -192,7 +253,7 @@ Deno.test({
     assertEquals(
       Buffer.byteLength(Buffer.alloc(0)),
       Buffer.alloc(0).byteLength,
-      "Byte lenght differs on buffers"
+      "Byte lenght differs on buffers",
     );
   },
 });
@@ -245,7 +306,7 @@ Deno.test({
       },
       RangeError,
       "offset is out of bounds",
-      "should throw on negative numbers"
+      "should throw on negative numbers",
     );
   },
 });
@@ -258,7 +319,7 @@ Deno.test({
     assertEquals(
       buffer.toString(),
       "test",
-      "Buffer to string should recover the string"
+      "Buffer to string should recover the string",
     );
   },
 });
@@ -269,13 +330,13 @@ Deno.test({
     for (const encoding of ["hex", "HEX"]) {
       const buffer: Buffer = Buffer.from(
         "7468697320697320612074c3a97374",
-        encoding
+        encoding,
       );
       assertEquals(buffer.length, 15, "Buffer length should be 15");
       assertEquals(
         buffer.toString(),
         "this is a tést",
-        "Buffer to string should recover the string"
+        "Buffer to string should recover the string",
       );
     }
   },
@@ -290,7 +351,7 @@ Deno.test({
       assertEquals(
         buffer.toString(),
         "this is a tést",
-        "Buffer to string should recover the string"
+        "Buffer to string should recover the string",
       );
     }
   },
@@ -304,7 +365,7 @@ Deno.test({
       assertEquals(
         buffer.toString(encoding),
         "ZGVubyBsYW5k",
-        "Buffer to string should recover the string in base64"
+        "Buffer to string should recover the string in base64",
       );
     }
     const b64 = "dGhpcyBpcyBhIHTDqXN0";
@@ -320,7 +381,7 @@ Deno.test({
       assertEquals(
         buffer.toString(encoding),
         "64656e6f206c616e64",
-        "Buffer to string should recover the string"
+        "Buffer to string should recover the string",
       );
     }
     const hex = "64656e6f206c616e64";
@@ -343,7 +404,7 @@ Deno.test({
         },
         TypeError,
         `Unkown encoding: ${encoding}`,
-        "Should throw on invalid encoding"
+        "Should throw on invalid encoding",
       );
     }
   },
@@ -369,7 +430,7 @@ Deno.test({
           Buffer.from("yes", encoding);
         },
         TypeError,
-        `Unkown encoding: ${encoding}`
+        `Unkown encoding: ${encoding}`,
       );
     }
   },
@@ -390,7 +451,7 @@ Deno.test({
         },
         Error,
         `"${encoding}" encoding`,
-        "Should throw on invalid encoding"
+        "Should throw on invalid encoding",
       );
 
       assertThrows(
@@ -401,7 +462,7 @@ Deno.test({
         },
         Error,
         `"${encoding}" encoding`,
-        "Should throw on invalid encoding"
+        "Should throw on invalid encoding",
       );
     }
   },
@@ -415,7 +476,7 @@ Deno.test({
     assertEquals(
       buffer.toString(),
       "test",
-      "Buffer to string should recover the string"
+      "Buffer to string should recover the string",
     );
   },
 });
@@ -440,7 +501,7 @@ Deno.test({
   fn() {
     assertEquals(
       JSON.stringify(Buffer.from("deno")),
-      '{"type":"Buffer","data":[100,101,110,111]}'
+      '{"type":"Buffer","data":[100,101,110,111]}',
     );
   },
 });
@@ -453,5 +514,82 @@ Deno.test({
     const slice = buf.slice();
     slice[0]++;
     assertEquals(slice.toString(), "deno");
+  },
+});
+
+Deno.test({
+  name: "isEncoding returns true for valid encodings",
+  fn() {
+    [
+      "hex",
+      "HEX",
+      "HeX",
+      "utf8",
+      "utf-8",
+      "ascii",
+      "latin1",
+      "binary",
+      "base64",
+      "BASE64",
+      "BASe64",
+      "ucs2",
+      "ucs-2",
+      "utf16le",
+      "utf-16le",
+    ].forEach((enc) => {
+      assertEquals(Buffer.isEncoding(enc), true);
+    });
+  },
+});
+
+Deno.test({
+  name: "isEncoding returns false for invalid encodings",
+  fn() {
+    [
+      "utf9",
+      "utf-7",
+      "Unicode-FTW",
+      "new gnu gun",
+      false,
+      NaN,
+      {},
+      Infinity,
+      [],
+      1,
+      0,
+      -1,
+    ].forEach((enc) => {
+      assertEquals(Buffer.isEncoding(enc), false);
+    });
+  },
+});
+
+// ported from:
+// https://github.com/nodejs/node/blob/56dbe466fdbc598baea3bfce289bf52b97b8b8f7/test/parallel/test-buffer-equals.js#L6
+Deno.test({
+  name: "buf.equals",
+  fn() {
+    const b = Buffer.from("abcdf");
+    const c = Buffer.from("abcdf");
+    const d = Buffer.from("abcde");
+    const e = Buffer.from("abcdef");
+
+    assertEquals(b.equals(c), true);
+    assertEquals(d.equals(d), true);
+    assertEquals(
+      d.equals(new Uint8Array([0x61, 0x62, 0x63, 0x64, 0x65])),
+      true,
+    );
+
+    assertEquals(c.equals(d), false);
+    assertEquals(d.equals(e), false);
+
+    assertThrows(
+      // deno-lint-ignore ban-ts-comment
+      // @ts-ignore
+      () => Buffer.alloc(1).equals("abc"),
+      TypeError,
+      `The "otherBuffer" argument must be an instance of Buffer or Uint8Array. Received type string`,
+    );
   },
 });

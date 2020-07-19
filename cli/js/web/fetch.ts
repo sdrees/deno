@@ -1,12 +1,14 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+
 import { notImplemented } from "../util.ts";
 import { isTypedArray } from "./util.ts";
-import * as domTypes from "./dom_types.d.ts";
+import type * as domTypes from "./dom_types.d.ts";
 import { TextEncoder } from "./text_encoding.ts";
 import { DenoBlob, bytesSymbol as blobBytesSymbol } from "./blob.ts";
 import { read } from "../ops/io.ts";
 import { close } from "../ops/resources.ts";
-import { fetch as opFetch, FetchResponse } from "../ops/fetch.ts";
+import { fetch as opFetch } from "../ops/fetch.ts";
+import type { FetchResponse } from "../ops/fetch.ts";
 import * as Body from "./body.ts";
 import { getHeaderValueParams } from "./util.ts";
 import { ReadableStreamImpl } from "./streams/readable_stream.ts";
@@ -34,16 +36,15 @@ export class Response extends Body.Body implements domTypes.Response {
     const extraInit = responseData.get(init) || {};
     let { type = "default", url = "" } = extraInit;
 
-    let status = (Number(init.status) || 0) ?? 200;
+    let status = init.status === undefined ? 200 : Number(init.status || 0);
     let statusText = init.statusText ?? "";
-    let headers =
-      init.headers instanceof Headers
-        ? init.headers
-        : new Headers(init.headers);
+    let headers = init.headers instanceof Headers
+      ? init.headers
+      : new Headers(init.headers);
 
-    if (init.status && (status < 200 || status > 599)) {
+    if (init.status !== undefined && (status < 200 || status > 599)) {
       throw new RangeError(
-        `The status provided (${init.status}) is outside the range [200, 599]`
+        `The status provided (${init.status}) is outside the range [200, 599]`,
       );
     }
 
@@ -55,7 +56,6 @@ export class Response extends Body.Body implements domTypes.Response {
     if (!type) {
       type = "default";
     } else {
-      type = type;
       if (type == "error") {
         // spec: https://fetch.spec.whatwg.org/#concept-network-error
         status = 0;
@@ -110,14 +110,15 @@ export class Response extends Body.Body implements domTypes.Response {
     }
 
     const contentType = headers.get("content-type") || "";
+    const size = Number(headers.get("content-length")) || undefined;
 
-    super(body, contentType);
+    super(body, { contentType, size });
 
     this.url = url;
     this.statusText = statusText;
     this.status = extraInit.status || status;
     this.headers = headers;
-    this.redirected = extraInit.redirected;
+    this.redirected = extraInit.redirected || false;
     this.type = type;
   }
 
@@ -144,18 +145,17 @@ export class Response extends Body.Body implements domTypes.Response {
       resBody = tees[1];
     }
 
-    const cloned = new Response(resBody, {
+    return new Response(resBody, {
       status: this.status,
       statusText: this.statusText,
       headers: new Headers(headersList),
     });
-    return cloned;
   }
 
   static redirect(url: URL | string, status: number): domTypes.Response {
     if (![301, 302, 303, 307, 308].includes(status)) {
       throw new RangeError(
-        "The redirection status must be one of 301, 302, 303, 307 and 308."
+        "The redirection status must be one of 301, 302, 303, 307 and 308.",
       );
     }
     return new Response(null, {
@@ -170,7 +170,7 @@ function sendFetchReq(
   url: string,
   method: string | null,
   headers: Headers | null,
-  body: ArrayBufferView | undefined
+  body: ArrayBufferView | undefined,
 ): Promise<FetchResponse> {
   let headerArray: Array<[string, string]> = [];
   if (headers) {
@@ -188,7 +188,7 @@ function sendFetchReq(
 
 export async function fetch(
   input: (domTypes.Request & { _bodySource?: unknown }) | URL | string,
-  init?: domTypes.RequestInit
+  init?: domTypes.RequestInit,
 ): Promise<Response> {
   let url: string;
   let method: string | null = null;
@@ -202,10 +202,9 @@ export async function fetch(
     if (init != null) {
       method = init.method || null;
       if (init.headers) {
-        headers =
-          init.headers instanceof Headers
-            ? init.headers
-            : new Headers(init.headers);
+        headers = init.headers instanceof Headers
+          ? init.headers
+          : new Headers(init.headers);
       } else {
         headers = null;
       }
@@ -260,7 +259,7 @@ export async function fetch(
   }
 
   let responseBody;
-  let responseInit: ResponseInit = {};
+  let responseInit: domTypes.ResponseInit = {};
   while (remRedirectCount) {
     const fetchResponse = await sendFetchReq(url, method, headers, body);
 
@@ -341,11 +340,7 @@ export async function fetch(
             !redirectUrl.startsWith("http://") &&
             !redirectUrl.startsWith("https://")
           ) {
-            redirectUrl =
-              url.split("//")[0] +
-              "//" +
-              url.split("//")[1].split("/")[0] +
-              redirectUrl; // TODO: handle relative redirection more gracefully
+            redirectUrl = new URL(redirectUrl, url).href;
           }
           url = redirectUrl;
           redirected = true;

@@ -3,6 +3,66 @@
 /// <reference no-default-lib="true" />
 /// <reference lib="esnext" />
 
+/** Deno provides extra properties on `import.meta`.  These are included here
+ * to ensure that these are still available when using the Deno namepsace in
+ * conjunction with other type libs, like `dom`. */
+declare interface ImportMeta {
+  /** A string representation of the fully qualified module URL. */
+  url: string;
+
+  /** A flag that indicates if the current module is the main module that was
+   * called when starting the program under Deno.
+   *
+   * ```ts
+   * if (import.meta.main) {
+   *   // this was loaded as the main module, maybe do some bootstrapping
+   * }
+   * ```
+   */
+  main: boolean;
+}
+
+/** Deno supports user timing Level 3 (see: https://w3c.github.io/user-timing)
+ * which is not widely supported yet in other runtimes.  These types are here
+ * so that these features are still available when using the Deno namespace
+ * in conjunction with other type libs, like `dom`. */
+declare interface Performance {
+  /** Stores a timestamp with the associated name (a "mark"). */
+  mark(markName: string, options?: PerformanceMarkOptions): PerformanceMark;
+
+  /** Stores the `DOMHighResTimeStamp` duration between two marks along with the
+   * associated name (a "measure"). */
+  measure(
+    measureName: string,
+    options?: PerformanceMeasureOptions,
+  ): PerformanceMeasure;
+}
+
+declare interface PerformanceMarkOptions {
+  /** Metadata to be included in the mark. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  detail?: any;
+
+  /** Timestamp to be used as the mark time. */
+  startTime?: number;
+}
+
+declare interface PerformanceMeasureOptions {
+  /** Metadata to be included in the measure. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  detail?: any;
+
+  /** Timestamp to be used as the start time or string to be used as start
+   * mark.*/
+  start?: string | number;
+
+  /** Duration between the start and end times. */
+  duration?: number;
+
+  /** Timestamp to be used as the end time or string to be used as end mark. */
+  end?: string | number;
+}
+
 declare namespace Deno {
   /** A set of error constructors that are raised by Deno APIs. */
   export const errors: {
@@ -334,7 +394,7 @@ declare namespace Deno {
     dst: Writer,
     options?: {
       bufSize?: number;
-    }
+    },
   ): Promise<number>;
 
   /** Turns a Reader, `r`, into an async iterator.
@@ -370,7 +430,7 @@ declare namespace Deno {
     r: Reader,
     options?: {
       bufSize?: number;
-    }
+    },
   ): AsyncIterableIterator<Uint8Array>;
 
   /** Turns a ReaderSync, `r`, into an iterator.
@@ -406,7 +466,7 @@ declare namespace Deno {
     r: ReaderSync,
     options?: {
       bufSize?: number;
-    }
+    },
   ): IterableIterator<Uint8Array>;
 
   /** Synchronously open a file and return an instance of `Deno.File`.  The
@@ -439,7 +499,7 @@ declare namespace Deno {
    */
   export function open(
     path: string | URL,
-    options?: OpenOptions
+    options?: OpenOptions,
   ): Promise<File>;
 
   /** Creates a file if none exists or truncates an existing file and returns
@@ -581,7 +641,7 @@ declare namespace Deno {
   export function seekSync(
     rid: number,
     offset: number,
-    whence: SeekMode
+    whence: SeekMode,
   ): number;
 
   /** Seek a resource ID (`rid`) to the given `offset` under mode given by `whence`.
@@ -613,7 +673,7 @@ declare namespace Deno {
   export function seek(
     rid: number,
     offset: number,
-    whence: SeekMode
+    whence: SeekMode,
   ): Promise<number>;
 
   /** Close the given resource ID (rid) which has been previously opened, such
@@ -726,10 +786,12 @@ declare namespace Deno {
      *
      * The slice is valid for use only until the next buffer modification (that
      * is, only until the next call to a method like `read()`, `write()`,
-     * `reset()`, or `truncate()`). The slice aliases the buffer content at
+     * `reset()`, or `truncate()`). If `options.copy` is false the slice aliases the buffer content at
      * least until the next buffer modification, so immediate changes to the
-     * slice will affect the result of future reads. */
-    bytes(): Uint8Array;
+     * slice will affect the result of future reads.
+     * @param options Defaults to `{ copy: true }`
+     */
+    bytes(options?: { copy?: boolean }): Uint8Array;
     /** Returns whether the unread portion of the buffer is empty. */
     empty(): boolean;
     /** A read only number of bytes of the unread portion of the buffer. */
@@ -911,7 +973,7 @@ declare namespace Deno {
    * Requires `allow-write` permission. */
   export function mkdir(
     path: string | URL,
-    options?: MkdirOptions
+    options?: MkdirOptions,
   ): Promise<void>;
 
   export interface MakeTempOptions {
@@ -1064,10 +1126,14 @@ declare namespace Deno {
    * Throws Error (not implemented) if executed on Windows
    *
    * @param path path to the file
-   * @param uid user id (UID) of the new owner
-   * @param gid group id (GID) of the new owner
+   * @param uid user id (UID) of the new owner, or `null` for no change
+   * @param gid group id (GID) of the new owner, or `null` for no change
    */
-  export function chownSync(path: string | URL, uid: number, gid: number): void;
+  export function chownSync(
+    path: string | URL,
+    uid: number | null,
+    gid: number | null,
+  ): void;
 
   /** Change owner of a regular file or directory. This functionality
    * is not available on Windows.
@@ -1081,13 +1147,13 @@ declare namespace Deno {
    * Throws Error (not implemented) if executed on Windows
    *
    * @param path path to the file
-   * @param uid user id (UID) of the new owner
-   * @param gid group id (GID) of the new owner
+   * @param uid user id (UID) of the new owner, or `null` for no change
+   * @param gid group id (GID) of the new owner, or `null` for no change
    */
   export function chown(
     path: string | URL,
-    uid: number,
-    gid: number
+    uid: number | null,
+    gid: number | null,
   ): Promise<void>;
 
   export interface RemoveOptions {
@@ -1122,7 +1188,7 @@ declare namespace Deno {
    * Requires `allow-write` permission. */
   export function remove(
     path: string | URL,
-    options?: RemoveOptions
+    options?: RemoveOptions,
   ): Promise<void>;
 
   /** Synchronously renames (moves) `oldpath` to `newpath`. Paths may be files or
@@ -1351,7 +1417,7 @@ declare namespace Deno {
    * Requires `allow-write` permission on toPath. */
   export function copyFileSync(
     fromPath: string | URL,
-    toPath: string | URL
+    toPath: string | URL,
   ): void;
 
   /** Copies the contents and permissions of one file to another specified path,
@@ -1366,7 +1432,7 @@ declare namespace Deno {
    * Requires `allow-write` permission on toPath. */
   export function copyFile(
     fromPath: string | URL,
-    toPath: string | URL
+    toPath: string | URL,
   ): Promise<void>;
 
   /** Returns the full path destination of the named symbolic link.
@@ -1472,7 +1538,7 @@ declare namespace Deno {
   export function writeFileSync(
     path: string | URL,
     data: Uint8Array,
-    options?: WriteFileOptions
+    options?: WriteFileOptions,
   ): void;
 
   /** Write `data` to the given `path`, by default creating a new file if needed,
@@ -1492,7 +1558,7 @@ declare namespace Deno {
   export function writeFile(
     path: string | URL,
     data: Uint8Array,
-    options?: WriteFileOptions
+    options?: WriteFileOptions,
   ): Promise<void>;
 
   /** Synchronously write string `data` to the given `path`, by default creating a new file if needed,
@@ -1504,7 +1570,11 @@ declare namespace Deno {
    *
    * Requires `allow-write` permission, and `allow-read` if `options.create` is `false`.
    */
-  export function writeTextFileSync(path: string | URL, data: string): void;
+  export function writeTextFileSync(
+    path: string | URL,
+    data: string,
+    options?: WriteFileOptions,
+  ): void;
 
   /** Asynchronously write string `data` to the given `path`, by default creating a new file if needed,
    * else overwriting.
@@ -1517,7 +1587,8 @@ declare namespace Deno {
    */
   export function writeTextFile(
     path: string | URL,
-    data: string
+    data: string,
+    options?: WriteFileOptions,
   ): Promise<void>;
 
   /** Synchronously truncates or extends the specified file, to reach the
@@ -1621,7 +1692,7 @@ declare namespace Deno {
    *
    * Requires `allow-net` permission. */
   export function listen(
-    options: ListenOptions & { transport?: "tcp" }
+    options: ListenOptions & { transport?: "tcp" },
   ): Listener;
 
   export interface ListenTlsOptions extends ListenOptions {
@@ -1773,21 +1844,18 @@ declare namespace Deno {
    */
   export function watchFs(
     paths: string | string[],
-    options?: { recursive: boolean }
+    options?: { recursive: boolean },
   ): AsyncIterableIterator<FsEvent>;
 
   export class Process<T extends RunOptions = RunOptions> {
     readonly rid: number;
     readonly pid: number;
-    readonly stdin: T["stdin"] extends "piped"
-      ? Writer & Closer
+    readonly stdin: T["stdin"] extends "piped" ? Writer & Closer
       : (Writer & Closer) | null;
-    readonly stdout: T["stdout"] extends "piped"
-      ? Reader & Closer
-      : (Writer & Closer) | null;
-    readonly stderr: T["stderr"] extends "piped"
-      ? Reader & Closer
-      : (Writer & Closer) | null;
+    readonly stdout: T["stdout"] extends "piped" ? Reader & Closer
+      : (Reader & Closer) | null;
+    readonly stderr: T["stderr"] extends "piped" ? Reader & Closer
+      : (Reader & Closer) | null;
     /** Resolves to the current status of the process. */
     status(): Promise<ProcessStatus>;
     /** Buffer the stdout until EOF and return it as `Uint8Array`.
@@ -1815,15 +1883,15 @@ declare namespace Deno {
 
   export type ProcessStatus =
     | {
-        success: true;
-        code: 0;
-        signal?: undefined;
-      }
+      success: true;
+      code: 0;
+      signal?: undefined;
+    }
     | {
-        success: false;
-        code: number;
-        signal?: number;
-      };
+      success: false;
+      code: number;
+      signal?: number;
+    };
 
   export interface RunOptions {
     /** Arguments to pass. Note, the first element needs to be a path to the
@@ -1872,8 +1940,18 @@ declare namespace Deno {
    * Requires `allow-run` permission. */
   export function run<T extends RunOptions = RunOptions>(opt: T): Process<T>;
 
-  interface InspectOptions {
+  export interface InspectOptions {
+    /** Traversal depth for nested objects. Defaults to 4. */
     depth?: number;
+    /** Sort Object, Set and Map entries by key. Defaults to false. */
+    sorted?: boolean;
+    /** Add a trailing comma for multiline collections. Defaults to false. */
+    trailingComma?: boolean;
+    /** Try to fit more than one entry of a collection on the same line.
+     * Defaults to true. */
+    compact?: boolean;
+    /** The maximum number of iterable entries to print. Defaults to 100. */
+    iterableLimit?: number;
   }
 
   /** Converts the input into a string that has the same format as printed by

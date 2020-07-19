@@ -19,12 +19,9 @@ interface MultipartHeaders {
 
 export class MultipartBuilder {
   readonly boundary: string;
-  readonly formData: FormData;
-  readonly writer: Buffer;
-  constructor(formData: FormData, boundary?: string) {
+  readonly writer = new Buffer();
+  constructor(readonly formData: FormData, boundary?: string) {
     this.boundary = boundary ?? this.#createBoundary();
-    this.formData = formData;
-    this.writer = new Buffer();
   }
 
   getContentType(): string {
@@ -67,7 +64,7 @@ export class MultipartBuilder {
   #writeFileHeaders = (
     field: string,
     filename: string,
-    type?: string
+    type?: string,
   ): void => {
     const headers = [
       [
@@ -125,7 +122,7 @@ export class MultipartParser {
     return {
       headers,
       disposition: getHeaderValueParams(
-        headers.get("Content-Disposition") ?? ""
+        headers.get("Content-Disposition") ?? "",
       ),
     };
   };

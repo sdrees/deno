@@ -1,4 +1,5 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+
 import { build } from "./build.ts";
 import { exposeForTest } from "./internals.ts";
 
@@ -72,7 +73,7 @@ export function immutableDefine(
   o: any,
   p: string | number | symbol,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  value: any
+  value: any,
 ): void {
   Object.defineProperty(o, p, {
     value,

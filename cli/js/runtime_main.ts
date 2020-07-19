@@ -48,7 +48,7 @@ function windowClose(): void {
           // This should be fine, since only Window/MainWorker has .close()
           exit(0);
         },
-        0
+        0,
       )
     );
   }
@@ -96,10 +96,11 @@ export function bootstrapMainRuntime(): void {
     }
   });
 
-  const { args, cwd, noColor, pid, repl, unstableFlag } = runtime.start();
+  const { args, cwd, noColor, pid, ppid, repl, unstableFlag } = runtime.start();
 
   Object.defineProperties(denoNs, {
     pid: readOnly(pid),
+    ppid: readOnly(ppid),
     noColor: readOnly(noColor),
     args: readOnly(Object.freeze(args)),
   });

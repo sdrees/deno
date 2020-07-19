@@ -95,10 +95,10 @@ pub struct CoreIsolate {
 /// embedder slots.
 pub struct CoreIsolateState {
   pub resource_table: Rc<RefCell<ResourceTable>>,
-  pub global_context: v8::Global<v8::Context>,
-  pub(crate) shared_ab: v8::Global<v8::SharedArrayBuffer>,
-  pub(crate) js_recv_cb: v8::Global<v8::Function>,
-  pub(crate) js_macrotask_cb: v8::Global<v8::Function>,
+  pub global_context: Option<v8::Global<v8::Context>>,
+  pub(crate) shared_ab: Option<v8::Global<v8::SharedArrayBuffer>>,
+  pub(crate) js_recv_cb: Option<v8::Global<v8::Function>>,
+  pub(crate) js_macrotask_cb: Option<v8::Global<v8::Function>>,
   pub(crate) pending_promise_exceptions: HashMap<i32, v8::Global<v8::Value>>,
   pub(crate) js_error_create_fn: Box<JSErrorCreateFn>,
   pub(crate) shared: SharedQueue,
@@ -177,7 +177,7 @@ impl CoreIsolate {
       StartupData::None => (None, None),
     };
 
-    let mut global_context = v8::Global::<v8::Context>::new();
+    let global_context;
     let (mut isolate, maybe_snapshot_creator) = if will_snapshot {
       // TODO(ry) Support loading snapshots before snapshotting.
       assert!(startup_snapshot.is_none());
@@ -188,7 +188,7 @@ impl CoreIsolate {
       {
         let scope = &mut v8::HandleScope::new(&mut isolate);
         let context = bindings::initialize_context(scope);
-        global_context.set(scope, context);
+        global_context = v8::Global::new(scope, context);
         creator.set_default_context(context);
       }
       (isolate, Some(creator))
@@ -217,18 +217,18 @@ impl CoreIsolate {
           // main source code and source maps.
           bindings::initialize_context(scope)
         };
-        global_context.set(scope, context);
+        global_context = v8::Global::new(scope, context);
       }
       (isolate, None)
     };
 
     isolate.set_slot(Rc::new(RefCell::new(CoreIsolateState {
-      global_context,
+      global_context: Some(global_context),
       resource_table: Rc::new(RefCell::new(ResourceTable::default())),
       pending_promise_exceptions: HashMap::new(),
-      shared_ab: v8::Global::<v8::SharedArrayBuffer>::new(),
-      js_recv_cb: v8::Global::<v8::Function>::new(),
-      js_macrotask_cb: v8::Global::<v8::Function>::new(),
+      shared_ab: None,
+      js_recv_cb: None,
+      js_macrotask_cb: None,
       js_error_create_fn: Box::new(JSError::create),
       shared: SharedQueue::new(RECOMMENDED_SIZE),
       pending_ops: FuturesUnordered::new(),
@@ -285,9 +285,10 @@ impl CoreIsolate {
     let state_rc = Self::state(self);
     let state = state_rc.borrow();
 
-    let scope = &mut v8::HandleScope::new(self.v8_isolate.as_mut().unwrap());
-    let context = state.global_context.get(scope).unwrap();
-    let scope = &mut v8::ContextScope::new(scope, context);
+    let scope = &mut v8::HandleScope::with_context(
+      self.v8_isolate.as_mut().unwrap(),
+      state.global_context.as_ref().unwrap(),
+    );
 
     drop(state);
 
@@ -326,13 +327,8 @@ impl CoreIsolate {
     let state = Self::state(self);
 
     // Note: create_blob() method must not be called from within a HandleScope.
-    // The HandleScope created here is exited at the end of the block.
     // TODO(piscisaureus): The rusty_v8 type system should enforce this.
-    {
-      let v8_isolate = self.v8_isolate.as_mut().unwrap();
-      let scope = &mut v8::HandleScope::new(v8_isolate);
-      state.borrow_mut().global_context.reset(scope);
-    }
+    state.borrow_mut().global_context.take();
 
     let snapshot_creator = self.snapshot_creator.as_mut().unwrap();
     let snapshot = snapshot_creator
@@ -348,10 +344,11 @@ impl CoreIsolate {
   /// corresponds to the second argument of Deno.core.dispatch().
   ///
   /// Requires runtime to explicitly ask for op ids before using any of the ops.
-  pub fn register_op<F>(&mut self, name: &str, op: F) -> OpId
-  where
-    F: Fn(&mut CoreIsolateState, &[u8], &mut [ZeroCopyBuf]) -> Op + 'static,
-  {
+  pub fn register_op(
+    &mut self,
+    name: &str,
+    op: impl OpDispatcher + 'static,
+  ) -> OpId {
     let state_rc = Self::state(self);
     let mut state = state_rc.borrow_mut();
     state.op_registry.register(name, op)
@@ -371,12 +368,10 @@ impl Future for CoreIsolate {
       state.waker.register(cx.waker());
     }
 
-    let scope = &mut v8::HandleScope::new(&mut **core_isolate);
-    let context = {
-      let state = state_rc.borrow();
-      state.global_context.get(scope).unwrap()
-    };
-    let scope = &mut v8::ContextScope::new(scope, context);
+    let scope = &mut v8::HandleScope::with_context(
+      &mut **core_isolate,
+      state_rc.borrow().global_context.as_ref().unwrap(),
+    );
 
     check_promise_exceptions(scope)?;
 
@@ -466,7 +461,7 @@ impl CoreIsolateState {
   /// Requires runtime to explicitly ask for op ids before using any of the ops.
   pub fn register_op<F>(&mut self, name: &str, op: F) -> OpId
   where
-    F: Fn(&mut CoreIsolateState, &[u8], &mut [ZeroCopyBuf]) -> Op + 'static,
+    F: OpDispatcher + 'static,
   {
     self.op_registry.register(name, op)
   }
@@ -485,11 +480,10 @@ impl CoreIsolateState {
     &mut self,
     scope: &mut v8::HandleScope<'s>,
     op_id: OpId,
-    control_buf: &[u8],
     zero_copy_bufs: &mut [ZeroCopyBuf],
   ) -> Option<(OpId, Box<[u8]>)> {
     let op = if let Some(dispatcher) = self.op_registry.get(op_id) {
-      dispatcher(self, control_buf, zero_copy_bufs)
+      dispatcher.dispatch(self, zero_copy_bufs)
     } else {
       let message =
         v8::String::new(scope, &format!("Unknown op id: {}", op_id)).unwrap();
@@ -528,15 +522,12 @@ fn async_op_response<'s>(
 ) -> Result<(), ErrBox> {
   let context = scope.get_current_context();
   let global: v8::Local<v8::Value> = context.global(scope).into();
-
-  let state_rc = CoreIsolate::state(scope);
-  let state = state_rc.borrow_mut();
-
-  let js_recv_cb = state
+  let js_recv_cb = CoreIsolate::state(scope)
+    .borrow()
     .js_recv_cb
-    .get(scope)
+    .as_ref()
+    .map(|cb| v8::Local::new(scope, cb))
     .expect("Deno.core.recv has not been called.");
-  drop(state);
 
   let tc_scope = &mut v8::TryCatch::new(scope);
 
@@ -561,22 +552,21 @@ fn drain_macrotasks<'s>(scope: &mut v8::HandleScope<'s>) -> Result<(), ErrBox> {
   let context = scope.get_current_context();
   let global: v8::Local<v8::Value> = context.global(scope).into();
 
-  let js_macrotask_cb = {
-    let state_rc = CoreIsolate::state(scope);
-    let state = state_rc.borrow_mut();
-    state.js_macrotask_cb.get(scope)
+  let js_macrotask_cb = match CoreIsolate::state(scope)
+    .borrow_mut()
+    .js_macrotask_cb
+    .as_ref()
+  {
+    Some(cb) => v8::Local::new(scope, cb),
+    None => return Ok(()),
   };
-  if js_macrotask_cb.is_none() {
-    return Ok(());
-  }
-  let js_macrotask_cb = js_macrotask_cb.unwrap();
 
   // Repeatedly invoke macrotask callback until it returns true (done),
   // such that ready microtasks would be automatically run before
   // next macrotask is processed.
-  loop {
-    let tc_scope = &mut v8::TryCatch::new(scope);
+  let tc_scope = &mut v8::TryCatch::new(scope);
 
+  loop {
     let is_done = js_macrotask_cb.call(tc_scope, global, &[]);
 
     if let Some(exception) = tc_scope.exception() {
@@ -641,7 +631,7 @@ fn check_promise_exceptions<'s>(
   if let Some(&key) = state.pending_promise_exceptions.keys().next() {
     let handle = state.pending_promise_exceptions.remove(&key).unwrap();
     drop(state);
-    let exception = handle.get(scope).expect("empty error handle");
+    let exception = v8::Local::new(scope, handle);
     exception_to_err_result(scope, exception)
   } else {
     Ok(())
@@ -704,20 +694,21 @@ pub mod tests {
     let mut isolate = CoreIsolate::new(StartupData::None, false);
 
     let dispatcher = move |_state: &mut CoreIsolateState,
-                           control: &[u8],
                            zero_copy: &mut [ZeroCopyBuf]|
           -> Op {
       dispatch_count_.fetch_add(1, Ordering::Relaxed);
       match mode {
         Mode::Async => {
-          assert_eq!(control.len(), 1);
-          assert_eq!(control[0], 42);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 1);
+          assert_eq!(zero_copy[0][0], 42);
           let buf = vec![43u8].into_boxed_slice();
           Op::Async(futures::future::ready(buf).boxed())
         }
         Mode::AsyncUnref => {
-          assert_eq!(control.len(), 1);
-          assert_eq!(control[0], 42);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 1);
+          assert_eq!(zero_copy[0][0], 42);
           let fut = async {
             // This future never finish.
             futures::future::pending::<()>().await;
@@ -726,8 +717,6 @@ pub mod tests {
           Op::AsyncUnref(fut.boxed())
         }
         Mode::AsyncZeroCopy(count) => {
-          assert_eq!(control.len(), 1);
-          assert_eq!(control[0], 24);
           assert_eq!(zero_copy.len(), count as usize);
           zero_copy.iter().enumerate().for_each(|(idx, buf)| {
             assert_eq!(buf.len(), 1);
@@ -738,13 +727,15 @@ pub mod tests {
           Op::Async(futures::future::ready(buf).boxed())
         }
         Mode::OverflowReqSync => {
-          assert_eq!(control.len(), 100 * 1024 * 1024);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 100 * 1024 * 1024);
           let buf = vec![43u8].into_boxed_slice();
           Op::Sync(buf)
         }
         Mode::OverflowResSync => {
-          assert_eq!(control.len(), 1);
-          assert_eq!(control[0], 42);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 1);
+          assert_eq!(zero_copy[0][0], 42);
           let mut vec = Vec::<u8>::new();
           vec.resize(100 * 1024 * 1024, 0);
           vec[0] = 99;
@@ -752,13 +743,15 @@ pub mod tests {
           Op::Sync(buf)
         }
         Mode::OverflowReqAsync => {
-          assert_eq!(control.len(), 100 * 1024 * 1024);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 100 * 1024 * 1024);
           let buf = vec![43u8].into_boxed_slice();
           Op::Async(futures::future::ready(buf).boxed())
         }
         Mode::OverflowResAsync => {
-          assert_eq!(control.len(), 1);
-          assert_eq!(control[0], 42);
+          assert_eq!(zero_copy.len(), 1);
+          assert_eq!(zero_copy[0].len(), 1);
+          assert_eq!(zero_copy[0][0], 42);
           let mut vec = Vec::<u8>::new();
           vec.resize(100 * 1024 * 1024, 0);
           vec[0] = 4;
@@ -807,37 +800,38 @@ pub mod tests {
     js_check(isolate.execute(
       "filename.js",
       r#"
-        let control = new Uint8Array([24]);
-        Deno.core.send(1, control);
+        Deno.core.send(1);
         "#,
     ));
     assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
   }
 
   #[test]
-  fn test_dispatch_one_zero_copy_buf() {
-    let (mut isolate, dispatch_count) = setup(Mode::AsyncZeroCopy(1));
-    js_check(isolate.execute(
-      "filename.js",
-      r#"
-        let control = new Uint8Array([24]);
-        let zero_copy = new Uint8Array([0]);
-        Deno.core.send(1, control, zero_copy);
-        "#,
-    ));
-    assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
-  }
-
-  #[test]
-  fn test_dispatch_two_zero_copy_bufs() {
+  fn test_dispatch_stack_zero_copy_bufs() {
     let (mut isolate, dispatch_count) = setup(Mode::AsyncZeroCopy(2));
     js_check(isolate.execute(
       "filename.js",
       r#"
-        let control = new Uint8Array([24]);
         let zero_copy_a = new Uint8Array([0]);
         let zero_copy_b = new Uint8Array([1]);
-        Deno.core.send(1, control, zero_copy_a, zero_copy_b);
+        Deno.core.send(1, zero_copy_a, zero_copy_b);
+        "#,
+    ));
+    assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
+  }
+
+  #[test]
+  fn test_dispatch_heap_zero_copy_bufs() {
+    let (mut isolate, dispatch_count) = setup(Mode::AsyncZeroCopy(5));
+    js_check(isolate.execute(
+      "filename.js",
+      r#"
+        let zero_copy_a = new Uint8Array([0]);
+        let zero_copy_b = new Uint8Array([1]);
+        let zero_copy_c = new Uint8Array([2]);
+        let zero_copy_d = new Uint8Array([3]);
+        let zero_copy_e = new Uint8Array([4]);
+        Deno.core.send(1, zero_copy_a, zero_copy_b, zero_copy_c, zero_copy_d, zero_copy_e);
         "#,
     ));
     assert_eq!(dispatch_count.load(Ordering::Relaxed), 1);
@@ -1120,7 +1114,7 @@ pub mod tests {
         r#"
           let thrown;
           try {
-            Deno.core.dispatch(100, []);
+            Deno.core.dispatch(100);
           } catch (e) {
             thrown = e;
           }

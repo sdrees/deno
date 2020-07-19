@@ -1,4 +1,5 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+
 import { stat, statSync } from "./ops/fs/stat.ts";
 import { open, openSync } from "./files.ts";
 import { chmod, chmodSync } from "./ops/fs/chmod.ts";
@@ -14,7 +15,7 @@ export interface WriteFileOptions {
 export function writeFileSync(
   path: string | URL,
   data: Uint8Array,
-  options: WriteFileOptions = {}
+  options: WriteFileOptions = {},
 ): void {
   if (options.create !== undefined) {
     const create = !!options.create;
@@ -44,7 +45,7 @@ export function writeFileSync(
 export async function writeFile(
   path: string | URL,
   data: Uint8Array,
-  options: WriteFileOptions = {}
+  options: WriteFileOptions = {},
 ): Promise<void> {
   if (options.create !== undefined) {
     const create = !!options.create;

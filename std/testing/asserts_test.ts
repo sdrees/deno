@@ -1,5 +1,6 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
 import {
+  _format,
   assert,
   assertNotEquals,
   assertStringContains,
@@ -15,7 +16,7 @@ import {
   unimplemented,
   unreachable,
 } from "./asserts.ts";
-import { red, green, gray, bold, yellow } from "../fmt/colors.ts";
+import { red, green, gray, bold, yellow, stripColor } from "../fmt/colors.ts";
 
 Deno.test("testingEqual", function (): void {
   assert(equal("world", "world"));
@@ -28,19 +29,25 @@ Deno.test("testingEqual", function (): void {
   assert(
     equal(
       { hello: "world", hi: { there: "everyone" } },
-      { hello: "world", hi: { there: "everyone" } }
-    )
+      { hello: "world", hi: { there: "everyone" } },
+    ),
   );
   assert(
     !equal(
       { hello: "world", hi: { there: "everyone" } },
-      { hello: "world", hi: { there: "everyone else" } }
-    )
+      { hello: "world", hi: { there: "everyone else" } },
+    ),
   );
   assert(equal(/deno/, /deno/));
   assert(!equal(/deno/, /node/));
   assert(equal(new Date(2019, 0, 3), new Date(2019, 0, 3)));
   assert(!equal(new Date(2019, 0, 3), new Date(2019, 1, 3)));
+  assert(
+    !equal(
+      new Date(2019, 0, 3, 4, 20, 1, 10),
+      new Date(2019, 0, 3, 4, 20, 1, 20),
+    ),
+  );
   assert(equal(new Set([1]), new Set([1])));
   assert(!equal(new Set([1]), new Set([2])));
   assert(equal(new Set([1, 2, 3]), new Set([3, 2, 1])));
@@ -58,20 +65,20 @@ Deno.test("testingEqual", function (): void {
       new Map([
         ["foo", "bar"],
         ["baz", "baz"],
-      ])
-    )
+      ]),
+    ),
   );
   assert(
     equal(
       new Map([["foo", new Map([["bar", "baz"]])]]),
-      new Map([["foo", new Map([["bar", "baz"]])]])
-    )
+      new Map([["foo", new Map([["bar", "baz"]])]]),
+    ),
   );
   assert(
     equal(
       new Map([["foo", { bar: "baz" }]]),
-      new Map([["foo", { bar: "baz" }]])
-    )
+      new Map([["foo", { bar: "baz" }]]),
+    ),
   );
   assert(
     equal(
@@ -82,8 +89,8 @@ Deno.test("testingEqual", function (): void {
       new Map([
         ["baz", "qux"],
         ["foo", "bar"],
-      ])
-    )
+      ]),
+    ),
   );
   assert(equal(new Map([["foo", ["bar"]]]), new Map([["foo", ["bar"]]])));
   assert(!equal(new Map([["foo", "bar"]]), new Map([["bar", "baz"]])));
@@ -93,14 +100,14 @@ Deno.test("testingEqual", function (): void {
       new Map([
         ["foo", "bar"],
         ["bar", "baz"],
-      ])
-    )
+      ]),
+    ),
   );
   assert(
     !equal(
       new Map([["foo", new Map([["bar", "baz"]])]]),
-      new Map([["foo", new Map([["bar", "qux"]])]])
-    )
+      new Map([["foo", new Map([["bar", "qux"]])]]),
+    ),
   );
   assert(equal(new Map([[{ x: 1 }, true]]), new Map([[{ x: 1 }, true]])));
   assert(!equal(new Map([[{ x: 1 }, true]]), new Map([[{ x: 1 }, false]])));
@@ -113,13 +120,13 @@ Deno.test("testingEqual", function (): void {
   assert(equal(new Uint8Array([1, 2, 3, 4]), new Uint8Array([1, 2, 3, 4])));
   assert(!equal(new Uint8Array([1, 2, 3, 4]), new Uint8Array([2, 1, 4, 3])));
   assert(
-    equal(new URL("https://example.test"), new URL("https://example.test"))
+    equal(new URL("https://example.test"), new URL("https://example.test")),
   );
   assert(
     !equal(
       new URL("https://example.test"),
-      new URL("https://example.test/with-path")
-    )
+      new URL("https://example.test/with-path"),
+    ),
   );
 });
 
@@ -128,6 +135,10 @@ Deno.test("testingNotEquals", function (): void {
   const b = { bar: "foo" };
   assertNotEquals(a, b);
   assertNotEquals("Denosaurus", "Tyrannosaurus");
+  assertNotEquals(
+    new Date(2019, 0, 3, 4, 20, 1, 10),
+    new Date(2019, 0, 3, 4, 20, 1, 20),
+  );
   let didThrow;
   try {
     assertNotEquals("Raptor", "Raptor");
@@ -161,12 +172,28 @@ Deno.test("testingArrayContains", function (): void {
   assertArrayContains(fixtureObject, [{ deno: "luv" }]);
   assertArrayContains(
     Uint8Array.from([1, 2, 3, 4]),
-    Uint8Array.from([1, 2, 3])
+    Uint8Array.from([1, 2, 3]),
   );
   assertThrows(
     (): void => assertArrayContains(fixtureObject, [{ deno: "node" }]),
     AssertionError,
-    `actual: "[ { deno: "luv" }, { deno: "Js" } ]" expected to contain: "[ { deno: "node" } ]"\nmissing: [ { deno: "node" } ]`
+    `actual: "[
+  {
+    deno: "luv",
+  },
+  {
+    deno: "Js",
+  },
+]" expected to contain: "[
+  {
+    deno: "node",
+  },
+]"
+missing: [
+  {
+    deno: "node",
+  },
+]`,
   );
 });
 
@@ -177,7 +204,7 @@ Deno.test("testingAssertStringContainsThrow", function (): void {
   } catch (e) {
     assert(
       e.message ===
-        `actual: "Denosaurus from Jurassic" expected to contain: "Raptor"`
+        `actual: "Denosaurus from Jurassic" expected to contain: "Raptor"`,
     );
     assert(e instanceof AssertionError);
     didThrow = true;
@@ -196,7 +223,7 @@ Deno.test("testingAssertStringMatchingThrows", function (): void {
   } catch (e) {
     assert(
       e.message ===
-        `actual: "Denosaurus from Jurassic" expected to match: "/Raptor/"`
+        `actual: "Denosaurus from Jurassic" expected to match: "/Raptor/"`,
     );
     assert(e instanceof AssertionError);
     didThrow = true;
@@ -235,7 +262,7 @@ Deno.test("testingAssertFail", function (): void {
       fail("foo");
     },
     AssertionError,
-    "Failed assertion: foo"
+    "Failed assertion: foo",
   );
 });
 
@@ -248,12 +275,12 @@ Deno.test("testingAssertFailWithWrongErrorClass", function (): void {
         (): void => {
           fail("foo");
         },
-        Error,
-        "Failed assertion: foo"
+        TypeError,
+        "Failed assertion: foo",
       );
     },
     AssertionError,
-    `Expected error to be instance of "Error", but was "AssertionError"`
+    `Expected error to be instance of "TypeError", but was "AssertionError"`,
   );
 });
 
@@ -272,9 +299,9 @@ Deno.test("testingAssertThrowsAsyncWithReturnType", () => {
 const createHeader = (): string[] => [
   "",
   "",
-  `    ${gray(bold("[Diff]"))} ${red(bold("Actual"))} / ${green(
-    bold("Expected")
-  )}`,
+  `    ${gray(bold("[Diff]"))} ${red(bold("Actual"))} / ${
+    green(bold("Expected"))
+  }`,
   "",
   "",
 ];
@@ -305,7 +332,7 @@ Deno.test({
         removed(`-   ${yellow("1")}`),
         added(`+   ${yellow("2")}`),
         "",
-      ].join("\n")
+      ].join("\n"),
     );
   },
 });
@@ -321,7 +348,7 @@ Deno.test({
         ...createHeader(),
         removed(`-   ${yellow("1")}`),
         added(`+   "1"`),
-      ].join("\n")
+      ].join("\n"),
     );
   },
 });
@@ -332,13 +359,13 @@ Deno.test({
     assertThrows(
       (): void => assertEquals([1, "2", 3], ["1", "2", 3]),
       AssertionError,
-      [
-        "Values are not equal:",
-        ...createHeader(),
-        removed(`-   [ ${yellow("1")}, ${green('"2"')}, ${yellow("3")} ]`),
-        added(`+   [ ${green('"1"')}, ${green('"2"')}, ${yellow("3")} ]`),
-        "",
-      ].join("\n")
+      `
+    [
+-     1,
++     "1",
+      "2",
+      3,
+    ]`,
     );
   },
 });
@@ -349,17 +376,37 @@ Deno.test({
     assertThrows(
       (): void => assertEquals({ a: 1, b: "2", c: 3 }, { a: 1, b: 2, c: [3] }),
       AssertionError,
+      `
+    {
+      a: 1,
++     b: 2,
++     c: [
++       3,
++     ],
+-     b: "2",
+-     c: 3,
+    }`,
+    );
+  },
+});
+
+Deno.test({
+  name: "failed with date",
+  fn(): void {
+    assertThrows(
+      (): void =>
+        assertEquals(
+          new Date(2019, 0, 3, 4, 20, 1, 10),
+          new Date(2019, 0, 3, 4, 20, 1, 20),
+        ),
+      AssertionError,
       [
         "Values are not equal:",
         ...createHeader(),
-        removed(
-          `-   { a: ${yellow("1")}, b: ${green('"2"')}, c: ${yellow("3")} }`
-        ),
-        added(
-          `+   { a: ${yellow("1")}, b: ${yellow("2")}, c: [ ${yellow("3")} ] }`
-        ),
+        removed(`-   ${new Date(2019, 0, 3, 4, 20, 1, 10).toISOString()}`),
+        added(`+   ${new Date(2019, 0, 3, 4, 20, 1, 20).toISOString()}`),
         "",
-      ].join("\n")
+      ].join("\n"),
     );
   },
 });
@@ -387,13 +434,14 @@ Deno.test({
     assertThrows(
       (): void => assertStrictEquals({ a: 1, b: 2 }, { a: 1, c: [3] }),
       AssertionError,
-      [
-        "Values are not strictly equal:",
-        ...createHeader(),
-        removed(`-   { a: ${yellow("1")}, b: ${yellow("2")} }`),
-        added(`+   { a: ${yellow("1")}, c: [ ${yellow("3")} ] }`),
-        "",
-      ].join("\n")
+      `
+    {
+      a: 1,
++     c: [
++       3,
++     ],
+-     b: 2,
+    }`,
     );
   },
 });
@@ -404,11 +452,24 @@ Deno.test({
     assertThrows(
       (): void => assertStrictEquals({ a: 1, b: 2 }, { a: 1, b: 2 }),
       AssertionError,
-      [
-        "Values have the same structure but are not reference-equal:\n",
-        red(`     { a: ${yellow("1")}, b: ${yellow("2")} }`),
-      ].join("\n")
+      `Values have the same structure but are not reference-equal:
+
+    {
+      a: 1,
+      b: 2,
+    }`,
     );
+  },
+});
+
+Deno.test({
+  name: "assert* functions with specified type paratemeter",
+  fn(): void {
+    assertEquals<string>("hello", "hello");
+    assertNotEquals<number>(1, 2);
+    assertArrayContains<boolean>([true, false], [true]);
+    const value = { x: 1 };
+    assertStrictEquals<typeof value>(value, value);
   },
 });
 
@@ -420,11 +481,11 @@ Deno.test("Assert Throws Non-Error Fail", () => {
           throw "Panic!";
         },
         String,
-        "Panic!"
+        "Panic!",
       );
     },
     AssertionError,
-    "A non-Error object was thrown."
+    "A non-Error object was thrown.",
   );
 
   assertThrows(
@@ -434,7 +495,7 @@ Deno.test("Assert Throws Non-Error Fail", () => {
       });
     },
     AssertionError,
-    "A non-Error object was thrown."
+    "A non-Error object was thrown.",
   );
 
   assertThrows(
@@ -444,7 +505,7 @@ Deno.test("Assert Throws Non-Error Fail", () => {
       });
     },
     AssertionError,
-    "A non-Error object was thrown."
+    "A non-Error object was thrown.",
   );
 });
 
@@ -456,11 +517,11 @@ Deno.test("Assert Throws Async Non-Error Fail", () => {
           return Promise.reject("Panic!");
         },
         String,
-        "Panic!"
+        "Panic!",
       );
     },
     AssertionError,
-    "A non-Error object was thrown or rejected."
+    "A non-Error object was thrown or rejected.",
   );
 
   assertThrowsAsync(
@@ -470,7 +531,7 @@ Deno.test("Assert Throws Async Non-Error Fail", () => {
       });
     },
     AssertionError,
-    "A non-Error object was thrown or rejected."
+    "A non-Error object was thrown or rejected.",
   );
 
   assertThrowsAsync(
@@ -480,7 +541,7 @@ Deno.test("Assert Throws Async Non-Error Fail", () => {
       });
     },
     AssertionError,
-    "A non-Error object was thrown or rejected."
+    "A non-Error object was thrown or rejected.",
   );
 
   assertThrowsAsync(
@@ -490,6 +551,98 @@ Deno.test("Assert Throws Async Non-Error Fail", () => {
       });
     },
     AssertionError,
-    "A non-Error object was thrown or rejected."
+    "A non-Error object was thrown or rejected.",
+  );
+});
+
+Deno.test("assertEquals diff for differently ordered objects", () => {
+  assertThrows(
+    () => {
+      assertEquals(
+        {
+          aaaaaaaaaaaaaaaaaaaaaaaa: 0,
+          bbbbbbbbbbbbbbbbbbbbbbbb: 0,
+          ccccccccccccccccccccccc: 0,
+        },
+        {
+          ccccccccccccccccccccccc: 1,
+          aaaaaaaaaaaaaaaaaaaaaaaa: 0,
+          bbbbbbbbbbbbbbbbbbbbbbbb: 0,
+        },
+      );
+    },
+    AssertionError,
+    `
+    {
+      aaaaaaaaaaaaaaaaaaaaaaaa: 0,
+      bbbbbbbbbbbbbbbbbbbbbbbb: 0,
+-     ccccccccccccccccccccccc: 0,
++     ccccccccccccccccccccccc: 1,
+    }`,
+  );
+});
+
+// Check that the diff formatter overrides some default behaviours of
+// `Deno.inspect()` which are problematic for diffing.
+Deno.test("assert diff formatting", () => {
+  // Wraps objects into multiple lines even when they are small. Prints trailing
+  // commas.
+  assertEquals(
+    stripColor(_format({ a: 1, b: 2 })),
+    `{
+  a: 1,
+  b: 2,
+}`,
+  );
+
+  // Same for nested small objects.
+  assertEquals(
+    stripColor(_format([{ x: { a: 1, b: 2 }, y: ["a", "b"] }])),
+    `[
+  {
+    x: {
+      a: 1,
+      b: 2,
+    },
+    y: [
+      "a",
+      "b",
+    ],
+  },
+]`,
+  );
+
+  // Grouping is disabled.
+  assertEquals(
+    stripColor(_format(["i", "i", "i", "i", "i", "i", "i"])),
+    `[
+  "i",
+  "i",
+  "i",
+  "i",
+  "i",
+  "i",
+  "i",
+]`,
+  );
+});
+
+Deno.test("Assert Throws Parent Error", () => {
+  assertThrows(
+    () => {
+      throw new AssertionError("Fail!");
+    },
+    Error,
+    "Fail!",
+  );
+});
+
+Deno.test("Assert Throws Async Parent Error", () => {
+  assertThrowsAsync(
+    () => {
+      throw new AssertionError("Fail!");
+    },
+    Error,
+    "Fail!",
   );
 });

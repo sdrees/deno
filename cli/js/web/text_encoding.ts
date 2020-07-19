@@ -1,4 +1,5 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
+
 // The following code is based off of text-encoding at:
 // https://github.com/inexorabletash/text-encoding
 //
@@ -104,7 +105,7 @@ export function atob(s: string): string {
   if (rem === 1 || /[^+/0-9A-Za-z]/.test(s)) {
     throw new DOMException(
       "The string to be decoded is not correctly encoded",
-      "DataDecodeError"
+      "DataDecodeError",
     );
   }
 
@@ -128,7 +129,7 @@ export function btoa(s: string): string {
     if (charCode > 0xff) {
       throw new TypeError(
         "The string to be encoded contains characters " +
-          "outside of the Latin1 range."
+          "outside of the Latin1 range.",
       );
     }
     byteArray.push(charCode);
@@ -151,12 +152,12 @@ interface Encoder {
 }
 
 class SingleByteDecoder implements Decoder {
-  #index: number[];
-  #fatal: boolean;
+  readonly #index: number[];
+  readonly #fatal: boolean;
 
   constructor(
     index: number[],
-    { ignoreBOM = false, fatal = false }: DecoderOptions = {}
+    { ignoreBOM = false, fatal = false }: DecoderOptions = {},
   ) {
     if (ignoreBOM) {
       throw new TypeError("Ignoring the BOM is available only with utf-8.");
@@ -221,7 +222,7 @@ const decoders = new Map<string, (options: DecoderOptions) => Decoder>();
 
 // Single byte decoders are an array of code point lookups
 const encodingIndexes = new Map<string, number[]>();
-// prettier-ignore
+// deno-fmt-ignore
 encodingIndexes.set("windows-1252", [
   8364,
   129,
@@ -357,7 +358,7 @@ for (const [key, index] of encodingIndexes) {
     key,
     (options: DecoderOptions): SingleByteDecoder => {
       return new SingleByteDecoder(index, options);
-    }
+    },
   );
 }
 
@@ -422,7 +423,7 @@ function isEitherArrayBuffer(x: any): x is EitherArrayBuffer {
 }
 
 export class TextDecoder {
-  #encoding: string;
+  readonly #encoding: string;
 
   get encoding(): string {
     return this.#encoding;
@@ -441,7 +442,7 @@ export class TextDecoder {
     const encoding = encodings.get(label);
     if (!encoding) {
       throw new RangeError(
-        `The encoding label provided ('${label}') is invalid.`
+        `The encoding label provided ('${label}') is invalid.`,
       );
     }
     if (!decoders.has(encoding) && encoding !== "utf-8") {
@@ -452,7 +453,7 @@ export class TextDecoder {
 
   decode(
     input?: BufferSource,
-    options: TextDecodeOptions = { stream: false }
+    options: TextDecodeOptions = { stream: false },
   ): string {
     if (options.stream) {
       throw new TypeError("Stream not supported.");

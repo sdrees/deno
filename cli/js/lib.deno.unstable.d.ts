@@ -43,6 +43,21 @@ declare namespace Deno {
    * Requires `allow-read` and `allow-write` permissions. */
   export function link(oldpath: string, newpath: string): Promise<void>;
 
+  /** **UNSTABLE**: New API, yet to be vetted.
+   *
+   * Gets the size of the console as columns/rows.
+   *
+   * ```ts
+   * const { columns, rows } = await Deno.consoleSize(Deno.stdout.rid);
+   * ```
+   */
+  export function consoleSize(
+    rid: number,
+  ): {
+    columns: number;
+    rows: number;
+  };
+
   export type SymlinkOptions = {
     type: "file" | "dir";
   };
@@ -62,7 +77,7 @@ declare namespace Deno {
   export function symlinkSync(
     oldpath: string,
     newpath: string,
-    options?: SymlinkOptions
+    options?: SymlinkOptions,
   ): void;
 
   /** **UNSTABLE**: This API needs a security review.
@@ -80,7 +95,7 @@ declare namespace Deno {
   export function symlink(
     oldpath: string,
     newpath: string,
-    options?: SymlinkOptions
+    options?: SymlinkOptions,
   ): Promise<void>;
 
   /** **Unstable**  There are questions around which permission this needs. And
@@ -439,7 +454,7 @@ declare namespace Deno {
    */
   export function transpileOnly(
     sources: Record<string, string>,
-    options?: CompilerOptions
+    options?: CompilerOptions,
   ): Promise<Record<string, TranspileOnlyResult>>;
 
   /** **UNSTABLE**: new API, yet to be vetted.
@@ -477,7 +492,7 @@ declare namespace Deno {
   export function compile(
     rootName: string,
     sources?: Record<string, string>,
-    options?: CompilerOptions
+    options?: CompilerOptions,
   ): Promise<[DiagnosticItem[] | undefined, Record<string, string>]>;
 
   /** **UNSTABLE**: new API, yet to be vetted.
@@ -520,7 +535,7 @@ declare namespace Deno {
   export function bundle(
     rootName: string,
     sources?: Record<string, string>,
-    options?: CompilerOptions
+    options?: CompilerOptions,
   ): Promise<[DiagnosticItem[] | undefined, string]>;
 
   /** **UNSTABLE**: Should not have same name as `window.location` type. */
@@ -642,7 +657,7 @@ declare namespace Deno {
     constructor(signal: typeof Deno.Signal);
     then<T, S>(
       f: (v: void) => T | Promise<T>,
-      g?: (v: void) => S | Promise<S>
+      g?: (v: void) => S | Promise<S>,
     ): Promise<T | S>;
     next(): Promise<IteratorResult<void>>;
     [Symbol.asyncIterator](): AsyncIterableIterator<void>;
@@ -762,7 +777,7 @@ declare namespace Deno {
   export function utimeSync(
     path: string,
     atime: number | Date,
-    mtime: number | Date
+    mtime: number | Date,
   ): void;
 
   /** **UNSTABLE**: needs investigation into high precision time.
@@ -779,7 +794,7 @@ declare namespace Deno {
   export function utime(
     path: string,
     atime: number | Date,
-    mtime: number | Date
+    mtime: number | Date,
   ): Promise<void>;
 
   /** **UNSTABLE**: Under consideration to remove `ShutdownMode` entirely.
@@ -845,7 +860,7 @@ declare namespace Deno {
    *
    * Requires `allow-read` and `allow-write` permission. */
   export function listen(
-    options: UnixListenOptions & { transport: "unix" }
+    options: UnixListenOptions & { transport: "unix" },
   ): Listener;
 
   /** **UNSTABLE**: new API, yet to be vetted
@@ -866,7 +881,7 @@ declare namespace Deno {
    *
    * Requires `allow-net` permission. */
   export function listenDatagram(
-    options: ListenOptions & { transport: "udp" }
+    options: ListenOptions & { transport: "udp" },
   ): DatagramConn;
 
   /** **UNSTABLE**: new API, yet to be vetted
@@ -882,7 +897,7 @@ declare namespace Deno {
    *
    * Requires `allow-read` and `allow-write` permission. */
   export function listenDatagram(
-    options: UnixListenOptions & { transport: "unixpacket" }
+    options: UnixListenOptions & { transport: "unixpacket" },
   ): DatagramConn;
 
   export interface UnixConnectOptions {
@@ -906,7 +921,7 @@ declare namespace Deno {
    *
    * Requires `allow-net` permission for "tcp" and `allow-read` for "unix". */
   export function connect(
-    options: ConnectOptions | UnixConnectOptions
+    options: ConnectOptions | UnixConnectOptions,
   ): Promise<Conn>;
 
   export interface StartTlsOptions {
@@ -935,7 +950,7 @@ declare namespace Deno {
    */
   export function startTls(
     conn: Conn,
-    options?: StartTlsOptions
+    options?: StartTlsOptions,
   ): Promise<Conn>;
 
   /** **UNSTABLE**: The `signo` argument may change to require the Deno.Signal
@@ -1086,7 +1101,8 @@ declare namespace Deno {
   /** **UNSTABLE**: The URL of the file that was originally executed from the command-line. */
   export const mainModule: string;
 
-  /** Synchronously truncates or extends the specified file stream, to reach the
+  /** **UNSTABLE**: new API, yet to be vetted.
+   * Synchronously truncates or extends the specified file stream, to reach the
    * specified `len`.  If `len` is not specified then the entire file contents
    * are truncated.
    *
@@ -1106,7 +1122,8 @@ declare namespace Deno {
    */
   export function ftruncateSync(rid: number, len?: number): void;
 
-  /** Truncates or extends the specified file stream, to reach the specified `len`. If
+  /** **UNSTABLE**: new API, yet to be vetted.
+   * Truncates or extends the specified file stream, to reach the specified `len`. If
    * `len` is not specified then the entire file contents are truncated.
    *
    * ```ts
@@ -1192,4 +1209,9 @@ declare namespace Deno {
    * ```
    */
   export function fstat(rid: number): Promise<FileInfo>;
+
+  /** **UNSTABLE**: New API, yet to be vetted.
+   * The pid of the current process's parent.
+   */
+  export const ppid: number;
 }
