@@ -67,12 +67,6 @@ pub mod version;
 mod web_worker;
 pub mod worker;
 
-pub use deno_lint::dprint_plugin_typescript;
-pub use deno_lint::swc_common;
-pub use deno_lint::swc_ecma_ast;
-pub use deno_lint::swc_ecma_parser;
-pub use deno_lint::swc_ecma_visit;
-
 use crate::doc::parser::DocFileLoader;
 use crate::file_fetcher::SourceFile;
 use crate::file_fetcher::SourceFileFetcher;
@@ -719,9 +713,11 @@ pub fn main() {
     DenoSubcommand::Cache { files } => {
       cache_command(flags, files).boxed_local()
     }
-    DenoSubcommand::Fmt { check, files } => {
-      fmt::format(files, check).boxed_local()
-    }
+    DenoSubcommand::Fmt {
+      check,
+      files,
+      ignore,
+    } => fmt::format(files, check, ignore).boxed_local(),
     DenoSubcommand::Info { file, json } => {
       info_command(flags, file, json).boxed_local()
     }
