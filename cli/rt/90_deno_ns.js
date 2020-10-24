@@ -53,8 +53,6 @@ __bootstrap.denoNs = {
   env: __bootstrap.os.env,
   exit: __bootstrap.os.exit,
   execPath: __bootstrap.os.execPath,
-  resources: __bootstrap.resources.resources,
-  close: __bootstrap.resources.close,
   Buffer: __bootstrap.buffer.Buffer,
   readAll: __bootstrap.buffer.readAll,
   readAllSync: __bootstrap.buffer.readAllSync,
@@ -82,6 +80,7 @@ __bootstrap.denoNs = {
   listen: __bootstrap.net.listen,
   connectTls: __bootstrap.tls.connectTls,
   listenTls: __bootstrap.tls.listenTls,
+  sleepSync: __bootstrap.timers.sleepSync,
 };
 
 __bootstrap.denoNsUnstable = {
@@ -103,6 +102,7 @@ __bootstrap.denoNsUnstable = {
   loadavg: __bootstrap.os.loadavg,
   hostname: __bootstrap.os.hostname,
   osRelease: __bootstrap.os.osRelease,
+  systemMemoryInfo: __bootstrap.os.systemMemoryInfo,
   applySourceMap: __bootstrap.errorStack.opApplySourceMap,
   formatDiagnostics: __bootstrap.errorStack.opFormatDiagnostics,
   shutdown: __bootstrap.net.shutdown,
@@ -118,6 +118,8 @@ __bootstrap.denoNsUnstable = {
   umask: __bootstrap.fs.umask,
   link: __bootstrap.fs.link,
   linkSync: __bootstrap.fs.linkSync,
+  futime: __bootstrap.fs.futime,
+  futimeSync: __bootstrap.fs.futimeSync,
   utime: __bootstrap.fs.utime,
   utimeSync: __bootstrap.fs.utimeSync,
   symlink: __bootstrap.fs.symlink,

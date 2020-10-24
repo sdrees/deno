@@ -1,9 +1,8 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
 
 ((window) => {
-  const { close } = window.__bootstrap.resources;
+  const core = window.Deno.core;
   const { read, readSync, write, writeSync } = window.__bootstrap.io;
-  const { sendSync, sendAsync } = window.__bootstrap.dispatchJson;
   const { pathFromURL } = window.__bootstrap.util;
 
   function seekSync(
@@ -11,7 +10,7 @@
     offset,
     whence,
   ) {
-    return sendSync("op_seek", { rid, offset, whence });
+    return core.jsonOpSync("op_seek_sync", { rid, offset, whence });
   }
 
   function seek(
@@ -19,7 +18,7 @@
     offset,
     whence,
   ) {
-    return sendAsync("op_seek", { rid, offset, whence });
+    return core.jsonOpAsync("op_seek_async", { rid, offset, whence });
   }
 
   function openSync(
@@ -28,7 +27,10 @@
   ) {
     checkOpenOptions(options);
     const mode = options?.mode;
-    const rid = sendSync("op_open", { path: pathFromURL(path), options, mode });
+    const rid = core.jsonOpSync(
+      "op_open_sync",
+      { path: pathFromURL(path), options, mode },
+    );
 
     return new File(rid);
   }
@@ -39,8 +41,8 @@
   ) {
     checkOpenOptions(options);
     const mode = options?.mode;
-    const rid = await sendAsync(
-      "op_open",
+    const rid = await core.jsonOpAsync(
+      "op_open_async",
       { path: pathFromURL(path), options, mode },
     );
 
@@ -101,13 +103,16 @@
     }
 
     close() {
-      close(this.rid);
+      core.close(this.rid);
     }
   }
 
   class Stdin {
     constructor() {
-      this.rid = 0;
+    }
+
+    get rid() {
+      return 0;
     }
 
     read(p) {
@@ -119,13 +124,16 @@
     }
 
     close() {
-      close(this.rid);
+      core.close(this.rid);
     }
   }
 
   class Stdout {
     constructor() {
-      this.rid = 1;
+    }
+
+    get rid() {
+      return 1;
     }
 
     write(p) {
@@ -137,13 +145,16 @@
     }
 
     close() {
-      close(this.rid);
+      core.close(this.rid);
     }
   }
 
   class Stderr {
     constructor() {
-      this.rid = 2;
+    }
+
+    get rid() {
+      return 2;
     }
 
     write(p) {
@@ -155,7 +166,7 @@
     }
 
     close() {
-      close(this.rid);
+      core.close(this.rid);
     }
   }
 
