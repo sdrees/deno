@@ -186,11 +186,11 @@ impl JsError {
         .and_then(|m| m.to_string(scope))
         .map(|s| s.to_rust_string_lossy(scope))
         .unwrap_or_else(|| "".to_string());
-      let message = if name != "" && message_prop != "" {
+      let message = if !name.is_empty() && !message_prop.is_empty() {
         format!("Uncaught {}: {}", name, message_prop)
-      } else if name != "" {
+      } else if !name.is_empty() {
         format!("Uncaught {}", name)
-      } else if message_prop != "" {
+      } else if !message_prop.is_empty() {
         format!("Uncaught {}", message_prop)
       } else {
         "Uncaught".to_string()
@@ -364,11 +364,11 @@ impl Display for JsError {
     if let Some(stack) = &self.stack {
       let stack_lines = stack.lines();
       if stack_lines.count() > 1 {
-        return writeln!(f, "{}", stack);
+        return write!(f, "{}", stack);
       }
     }
 
-    writeln!(f, "{}", self.message)?;
+    write!(f, "{}", self.message)?;
     if let Some(script_resource_name) = &self.script_resource_name {
       if self.line_number.is_some() && self.start_column.is_some() {
         let source_loc = format_source_loc(
@@ -376,7 +376,7 @@ impl Display for JsError {
           self.line_number.unwrap(),
           self.start_column.unwrap(),
         );
-        writeln!(f, "    at {}", source_loc)?;
+        write!(f, "\n    at {}", source_loc)?;
       }
     }
     Ok(())

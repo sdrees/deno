@@ -22,6 +22,7 @@
       "program_lifecycle": "Program lifecycle",
       "permission_apis": "Permission APIs",
       "compiler_apis": "Compiler APIs",
+      "web_platform_apis": "Web Platform APIs",
       "workers": "Workers"
     }
   },
@@ -66,6 +67,7 @@
     "children": {
       "script_installer": "Script installer",
       "formatter": "Formatter",
+      "repl": "Read-eval-print-loop",
       "bundler": "Bundler",
       "documentation_generator": "Documentation generator",
       "dependency_inspector": "Dependency inspector",
@@ -79,6 +81,7 @@
     "name": "Contributing",
     "children": {
       "building_from_source": "Building from source",
+      "release_schedule": "Release schedule",
       "development_tools": "Development tools",
       "style_guide": "Style guide",
       "architecture": "Architecture"

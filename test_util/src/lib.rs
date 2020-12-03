@@ -286,7 +286,7 @@ pub async fn run_all_servers() {
       Box::new(res)
     });
   let bad_redirect = warp::path("bad_redirect").map(|| -> Box<dyn Reply> {
-    let mut res = Response::new(Body::from(""));
+    let mut res = Response::new(Body::empty());
     *res.status_mut() = StatusCode::FOUND;
     Box::new(res)
   });
@@ -420,6 +420,19 @@ pub async fn run_all_servers() {
         HeaderValue::from_static("application/typescript"),
       );
       res
+    }))
+    .or(warp::path!("cli"/"tests"/"subdir"/"no_js_ext@1.0.0").map(|| {
+      let mut res = Response::new(Body::from(
+        r#"import { printHello } from "./mod2.ts";
+        printHello();
+        "#,
+      ));
+      let h = res.headers_mut();
+      h.insert(
+        "Content-type",
+        HeaderValue::from_static("application/javascript"),
+      );
+      res
     }));
 
   let content_type_handler = warp::any()
@@ -522,7 +535,7 @@ fn custom_headers(path: warp::path::Peek, f: warp::fs::File) -> Box<dyn Reply> {
     Some("application/x-www-form-urlencoded")
   } else if p.contains("unknown_ext") || p.contains("no_ext") {
     Some("text/typescript")
-  } else if p.contains("mismatch_ext") {
+  } else if p.contains("mismatch_ext") || p.contains("no_js_ext") {
     Some("text/javascript")
   } else if p.ends_with(".ts") || p.ends_with(".tsx") {
     Some("application/typescript")
@@ -763,26 +776,6 @@ pub fn deno_cmd() -> Command {
   c
 }
 
-pub fn run_python_script(script: &str) {
-  let deno_dir = new_deno_dir();
-  let output = Command::new("python")
-    .env("DENO_DIR", deno_dir.path())
-    .current_dir(root_path())
-    .arg(script)
-    .arg(format!("--build-dir={}", target_dir().display()))
-    .arg(format!("--executable={}", deno_exe_path().display()))
-    .output()
-    .expect("failed to spawn script");
-  if !output.status.success() {
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    panic!(
-      "{} executed with failing error code\n{}{}",
-      script, stdout, stderr
-    );
-  }
-}
-
 pub fn run_powershell_script_file(
   script_file_path: &str,
   args: Vec<&str>,
@@ -867,17 +860,34 @@ impl CheckOutputIntegrationTest {
     reader.read_to_string(&mut actual).unwrap();
 
     let status = process.wait().expect("failed to finish process");
-    let exit_code = status.code().unwrap();
+
+    if let Some(exit_code) = status.code() {
+      if self.exit_code != exit_code {
+        println!("OUTPUT\n{}\nOUTPUT", actual);
+        panic!(
+          "bad exit code, expected: {:?}, actual: {:?}",
+          self.exit_code, exit_code
+        );
+      }
+    } else {
+      #[cfg(unix)]
+      {
+        use std::os::unix::process::ExitStatusExt;
+        let signal = status.signal().unwrap();
+        println!("OUTPUT\n{}\nOUTPUT", actual);
+        panic!(
+          "process terminated by signal, expected exit code: {:?}, actual signal: {:?}",
+          self.exit_code, signal
+        );
+      }
+      #[cfg(not(unix))]
+      {
+        println!("OUTPUT\n{}\nOUTPUT", actual);
+        panic!("process terminated without status code on non unix platform, expected exit code: {:?}", self.exit_code);
+      }
+    }
 
     actual = strip_ansi_codes(&actual).to_string();
-
-    if self.exit_code != exit_code {
-      println!("OUTPUT\n{}\nOUTPUT", actual);
-      panic!(
-        "bad exit code, expected: {:?}, actual: {:?}",
-        self.exit_code, exit_code
-      );
-    }
 
     let expected = if let Some(s) = self.output_str {
       s.to_owned()
@@ -921,7 +931,7 @@ pub fn pattern_match(pattern: &str, s: &str, wildcard: &str) -> bool {
   // needs to be pre-pended so it can safely match anything or nothing and
   // continue matching.
   if pattern.lines().next() == Some(wildcard) {
-    s.insert_str(0, "\n");
+    s.insert(0, '\n');
   }
 
   let mut t = s.split_at(parts[0].len());
@@ -931,7 +941,7 @@ pub fn pattern_match(pattern: &str, s: &str, wildcard: &str) -> bool {
       continue;
     }
     dbg!(part, i);
-    if i == parts.len() - 1 && (*part == "" || *part == "\n") {
+    if i == parts.len() - 1 && (part.is_empty() || *part == "\n") {
       dbg!("exit 1 true", i);
       return true;
     }
@@ -1028,6 +1038,7 @@ pub fn parse_wrk_output(output: &str) -> WrkOutput {
   }
 }
 
+#[derive(Debug)]
 pub struct StraceOutput {
   pub percent_time: f64,
   pub seconds: f64,
@@ -1060,7 +1071,7 @@ pub fn parse_strace_output(output: &str) -> HashMap<String, StraceOutput> {
     let len = syscall_fields.len();
     let syscall_name = syscall_fields.last().unwrap();
 
-    if 5 <= len && len <= 6 {
+    if (5..=6).contains(&len) {
       summary.insert(
         syscall_name.to_string(),
         StraceOutput {

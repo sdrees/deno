@@ -1,7 +1,7 @@
 // Copyright 2018-2020 the Deno authors. All rights reserved. MIT license.
 import * as hex from "../encoding/hex.ts";
 import * as base64 from "../encoding/base64.ts";
-import { normalizeEncoding, notImplemented } from "./_utils.ts";
+import { Encodings, normalizeEncoding, notImplemented } from "./_utils.ts";
 
 const notImplementedEncodings = [
   "ascii",
@@ -11,7 +11,7 @@ const notImplementedEncodings = [
   "utf16le",
 ];
 
-function checkEncoding(encoding = "utf8", strict = true): string {
+function checkEncoding(encoding = "utf8", strict = true): Encodings {
   if (typeof encoding !== "string" || (strict && encoding === "")) {
     if (!strict) return "utf8";
     throw new TypeError(`Unkown encoding: ${encoding}`);
@@ -73,7 +73,7 @@ function base64ByteLength(str: string, bytes: number): number {
 /**
  * See also https://nodejs.org/api/buffer.html
  */
-export default class Buffer extends Uint8Array {
+export class Buffer extends Uint8Array {
   /**
    * Allocates a new Buffer of size bytes.
    */
@@ -93,14 +93,14 @@ export default class Buffer extends Uint8Array {
 
     let bufFill;
     if (typeof fill === "string") {
-      encoding = checkEncoding(encoding);
+      const clearEncoding = checkEncoding(encoding);
       if (
         typeof fill === "string" &&
         fill.length === 1 &&
-        encoding === "utf8"
+        clearEncoding === "utf8"
       ) {
         buf.fill(fill.charCodeAt(0));
-      } else bufFill = Buffer.from(fill, encoding);
+      } else bufFill = Buffer.from(fill, clearEncoding);
     } else if (typeof fill === "number") {
       buf.fill(fill);
     } else if (fill instanceof Uint8Array) {
@@ -163,10 +163,16 @@ export default class Buffer extends Uint8Array {
       }
     }
 
-    const buffer = new Buffer(totalLength);
+    const buffer = Buffer.allocUnsafe(totalLength);
     let pos = 0;
-    for (const buf of list) {
-      buffer.set(buf, pos);
+    for (const item of list) {
+      let buf: Buffer;
+      if (!(item instanceof Buffer)) {
+        buf = Buffer.from(item);
+      } else {
+        buf = item;
+      }
+      buf.copy(buffer, pos);
       pos += buf.length;
     }
 
@@ -198,7 +204,7 @@ export default class Buffer extends Uint8Array {
    */
   static from(string: string, encoding?: string): Buffer;
   static from(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // deno-lint-ignore no-explicit-any
     value: any,
     offsetOrEncoding?: number | string,
     length?: number,
@@ -228,7 +234,7 @@ export default class Buffer extends Uint8Array {
     return obj instanceof Buffer;
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // deno-lint-ignore no-explicit-any
   static isEncoding(encoding: any): boolean {
     return (
       typeof encoding === "string" &&
@@ -247,7 +253,12 @@ export default class Buffer extends Uint8Array {
     sourceStart = 0,
     sourceEnd = this.length,
   ): number {
-    const sourceBuffer = this.subarray(sourceStart, sourceEnd);
+    const sourceBuffer = this
+      .subarray(sourceStart, sourceEnd)
+      .subarray(0, Math.max(0, targetBuffer.length - targetStart));
+
+    if (sourceBuffer.length === 0) return 0;
+
     targetBuffer.set(sourceBuffer, targetStart);
     return sourceBuffer.length;
   }
@@ -587,11 +598,4 @@ export default class Buffer extends Uint8Array {
   }
 }
 
-export { Buffer };
-
-Object.defineProperty(globalThis, "Buffer", {
-  value: Buffer,
-  enumerable: false,
-  writable: true,
-  configurable: true,
-});
+export default { Buffer };

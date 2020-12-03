@@ -84,7 +84,7 @@ unitTest({ perms: { net: true } }, async function fetchBodyUsed(): Promise<
   const response = await fetch("http://localhost:4545/cli/tests/fixture.json");
   assertEquals(response.bodyUsed, false);
   assertThrows((): void => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    // deno-lint-ignore no-explicit-any
     (response as any).bodyUsed = true;
   });
   await response.blob();
@@ -693,18 +693,10 @@ unitTest(
     const response = await fetch("http://localhost:4546/", {
       redirect: "manual",
     }); // will redirect to http://localhost:4545/
-    assertEquals(response.status, 0);
-    assertEquals(response.statusText, "");
-    assertEquals(response.url, "");
-    assertEquals(response.type, "opaqueredirect");
-    try {
-      await response.text();
-      fail(
-        "Reponse.text() didn't throw on a filtered response without a body (type opaqueredirect)",
-      );
-    } catch (e) {
-      return;
-    }
+    assertEquals(response.status, 301);
+    assertEquals(response.url, "http://localhost:4546/");
+    assertEquals(response.type, "default");
+    assertEquals(response.headers.get("Location"), "http://localhost:4545/");
   },
 );
 

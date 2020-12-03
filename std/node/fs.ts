@@ -12,6 +12,7 @@ import { mkdir, mkdirSync } from "./_fs/_fs_mkdir.ts";
 import { copyFile, copyFileSync } from "./_fs/_fs_copy.ts";
 import { writeFile, writeFileSync } from "./_fs/_fs_writeFile.ts";
 import { readdir, readdirSync } from "./_fs/_fs_readdir.ts";
+import { realpath, realpathSync } from "./_fs/_fs_realpath.ts";
 import { rename, renameSync } from "./_fs/_fs_rename.ts";
 import { rmdir, rmdirSync } from "./_fs/_fs_rmdir.ts";
 import { unlink, unlinkSync } from "./_fs/_fs_unlink.ts";
@@ -21,6 +22,50 @@ import { stat, statSync } from "./_fs/_fs_stat.ts";
 import { lstat, lstatSync } from "./_fs/_fs_lstat.ts";
 
 import * as promises from "./_fs/promises/mod.ts";
+
+export default {
+  access,
+  accessSync,
+  appendFile,
+  appendFileSync,
+  chmod,
+  chmodSync,
+  chown,
+  chownSync,
+  close,
+  closeSync,
+  constants,
+  copyFile,
+  copyFileSync,
+  exists,
+  existsSync,
+  lstat,
+  lstatSync,
+  mkdir,
+  mkdirSync,
+  open,
+  openSync,
+  promises,
+  readdir,
+  readdirSync,
+  readFile,
+  readFileSync,
+  readlink,
+  readlinkSync,
+  realpath,
+  realpathSync,
+  rename,
+  renameSync,
+  rmdir,
+  rmdirSync,
+  stat,
+  statSync,
+  unlink,
+  unlinkSync,
+  watch,
+  writeFile,
+  writeFileSync,
+};
 
 export {
   access,
@@ -51,6 +96,8 @@ export {
   readFileSync,
   readlink,
   readlinkSync,
+  realpath,
+  realpathSync,
   rename,
   renameSync,
   rmdir,

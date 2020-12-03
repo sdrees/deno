@@ -2,15 +2,18 @@
 
 Deno ships with a built in code linter for JavaScript and TypeScript.
 
+**Note: linter is a new feature and still unstable thus it requires `--unstable`
+flag**
+
 ```shell
 # lint all JS/TS files in the current directory and subdirectories
-deno lint
+deno lint --unstable
 # lint specific files
-deno lint myfile1.ts myfile2.ts
-# read from stdin
-cat file.ts | deno lint -
-# print result as JSON (output is subject to change hence --unstable flag)
+deno lint --unstable myfile1.ts myfile2.ts
+# print result as JSON
 deno lint --unstable --json
+# read from stdin
+cat file.ts | deno lint --unstable -
 ```
 
 For more detail, run `deno lint --help`.
@@ -21,6 +24,7 @@ For more detail, run `deno lint --help`.
 - `ban-ts-comment`
 - `ban-types`
 - `ban-untagged-ignore`
+- `camelcase`
 - `constructor-super`
 - `for-direction`
 - `getter-return`
@@ -77,11 +81,15 @@ For more detail, run `deno lint --help`.
 - `no-unused-labels`
 - `no-with`
 - `prefer-as-const`
+- `prefer-const`
 - `prefer-namespace-keyword`
+- `require-await`
 - `require-yield`
-- `triple-slash-reference`
 - `use-isnan`
 - `valid-typeof`
+
+For more detail about each rule, visit
+[the deno_lint rule documentation](https://lint.deno.land).
 
 ### Ignore directives
 
@@ -138,20 +146,6 @@ function foo(): any {
 }
 
 // deno-lint-ignore no-explicit-any explicit-function-return-type
-function bar(a: any) {
-  // ...
-}
-```
-
-To provide some compatibility with ESLint `deno lint` also supports
-`// eslint-disable-next-line` directive. Just like with `// deno-lint-ignore`,
-it's required to specify the ignored rule name:
-
-```ts
-// eslint-disable-next-line no-empty
-while (true) {}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function bar(a: any) {
   // ...
 }
