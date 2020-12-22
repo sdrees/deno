@@ -10,17 +10,16 @@ use log::Level;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-
-/// Creates vector of strings, Vec<String>
-macro_rules! svec {
-    ($($x:expr),*) => (vec![$($x.to_string()),*]);
-}
+use tempfile::TempDir;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum DenoSubcommand {
   Bundle {
     source_file: String,
     out_file: Option<PathBuf>,
+  },
+  Cache {
+    files: Vec<String>,
   },
   Compile {
     source_file: String,
@@ -40,9 +39,6 @@ pub enum DenoSubcommand {
     code: String,
     as_typescript: bool,
   },
-  Cache {
-    files: Vec<String>,
-  },
   Fmt {
     check: bool,
     files: Vec<PathBuf>,
@@ -59,6 +55,7 @@ pub enum DenoSubcommand {
     root: Option<PathBuf>,
     force: bool,
   },
+  LanguageServer,
   Lint {
     files: Vec<PathBuf>,
     ignore: Vec<PathBuf>,
@@ -112,7 +109,7 @@ pub struct Flags {
   pub ca_file: Option<String>,
   pub cached_only: bool,
   pub config_path: Option<String>,
-  pub coverage: bool,
+  pub coverage_dir: Option<String>,
   pub ignore: Vec<PathBuf>,
   pub import_map_path: Option<String>,
   pub inspect: Option<SocketAddr>,
@@ -129,7 +126,7 @@ pub struct Flags {
   pub repl: bool,
   pub seed: Option<u64>,
   pub unstable: bool,
-  pub v8_flags: Option<Vec<String>>,
+  pub v8_flags: Vec<String>,
   pub version: bool,
   pub watch: bool,
   pub write_allowlist: Vec<PathBuf>,
@@ -230,9 +227,13 @@ lazy_static! {
   static ref LONG_VERSION: String = format!(
     "{} ({}, {})\nv8 {}\ntypescript {}",
     crate::version::deno(),
-    env!("PROFILE"),
+    if crate::version::is_canary() {
+      "canary"
+    } else {
+      env!("PROFILE")
+    },
     env!("TARGET"),
-    crate::version::v8(),
+    deno_core::v8_version(),
     crate::version::TYPESCRIPT
   );
 }
@@ -298,6 +299,8 @@ pub fn flags_from_vec_safe(args: Vec<String>) -> clap::Result<Flags> {
     lint_parse(&mut flags, m);
   } else if let Some(m) = matches.subcommand_matches("compile") {
     compile_parse(&mut flags, m);
+  } else if let Some(m) = matches.subcommand_matches("lsp") {
+    language_server_parse(&mut flags, m);
   } else {
     repl_parse(&mut flags, &matches);
   }
@@ -354,6 +357,7 @@ If the flag is set, restrict these messages to errors.",
     .subcommand(fmt_subcommand())
     .subcommand(info_subcommand())
     .subcommand(install_subcommand())
+    .subcommand(language_server_subcommand())
     .subcommand(lint_subcommand())
     .subcommand(repl_subcommand())
     .subcommand(run_subcommand())
@@ -611,11 +615,23 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   let allow_none = matches.is_present("allow-none");
   let quiet = matches.is_present("quiet");
   let filter = matches.value_of("filter").map(String::from);
-  let coverage = matches.is_present("coverage");
 
-  if coverage {
-    flags.coverage = true;
-  }
+  flags.coverage_dir = if matches.is_present("coverage") {
+    if let Some(coverage_dir) = matches.value_of("coverage") {
+      Some(coverage_dir.to_string())
+    } else {
+      Some(
+        TempDir::new()
+          .unwrap()
+          .into_path()
+          .to_str()
+          .unwrap()
+          .to_string(),
+      )
+    }
+  } else {
+    None
+  };
 
   if matches.is_present("script_arg") {
     let script_arg: Vec<String> = matches
@@ -688,6 +704,10 @@ fn doc_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
     filter,
     private,
   };
+}
+
+fn language_server_parse(flags: &mut Flags, _matches: &clap::ArgMatches) {
+  flags.subcommand = DenoSubcommand::LanguageServer;
 }
 
 fn lint_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
@@ -1081,6 +1101,17 @@ Show documentation for runtime built-ins:
     )
 }
 
+fn language_server_subcommand<'a, 'b>() -> App<'a, 'b> {
+  SubCommand::with_name("lsp")
+    .about("Start the language server")
+    .long_about(
+      r#"Start the Deno language server which will take input
+from stdin and provide output to stdout.
+  deno lsp
+"#,
+    )
+}
+
 fn lint_subcommand<'a, 'b>() -> App<'a, 'b> {
   SubCommand::with_name("lint")
     .about("Lint source files")
@@ -1199,7 +1230,11 @@ fn permission_args<'a, 'b>(app: App<'a, 'b>) -> App<'a, 'b> {
 
 fn run_subcommand<'a, 'b>() -> App<'a, 'b> {
   runtime_args(SubCommand::with_name("run"), true)
-    .arg(watch_arg())
+    .arg(
+      watch_arg()
+        .conflicts_with("inspect")
+        .conflicts_with("inspect-brk")
+    )
     .setting(AppSettings::TrailingVarArg)
     .arg(
         script_arg()
@@ -1260,7 +1295,10 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
     .arg(
       Arg::with_name("coverage")
         .long("coverage")
-        .takes_value(false)
+        .min_values(0)
+        .max_values(1)
+        .require_equals(true)
+        .takes_value(true)
         .requires("unstable")
         .conflicts_with("inspect")
         .conflicts_with("inspect-brk")
@@ -1465,8 +1503,7 @@ fn v8_flags_arg<'a, 'b>() -> Arg<'a, 'b> {
 
 fn v8_flags_arg_parse(flags: &mut Flags, matches: &ArgMatches) {
   if let Some(v8_flags) = matches.values_of("v8-flags") {
-    let s: Vec<String> = v8_flags.map(String::from).collect();
-    flags.v8_flags = Some(s);
+    flags.v8_flags = v8_flags.map(String::from).collect();
   }
 }
 
@@ -1474,8 +1511,6 @@ fn watch_arg<'a, 'b>() -> Arg<'a, 'b> {
   Arg::with_name("watch")
     .requires("unstable")
     .long("watch")
-    .conflicts_with("inspect")
-    .conflicts_with("inspect-brk")
     .help("Watch for file changes and restart process automatically")
     .long_help(
       "Watch for file changes and restart process automatically.
@@ -1501,16 +1536,7 @@ fn seed_arg_parse(flags: &mut Flags, matches: &ArgMatches) {
     let seed = seed_string.parse::<u64>().unwrap();
     flags.seed = Some(seed);
 
-    let v8_seed_flag = format!("--random-seed={}", seed);
-
-    match flags.v8_flags {
-      Some(ref mut v8_flags) => {
-        v8_flags.push(v8_seed_flag);
-      }
-      None => {
-        flags.v8_flags = Some(svec![v8_seed_flag]);
-      }
-    }
+    flags.v8_flags.push(format!("--random-seed={}", seed));
   }
 }
 
@@ -1630,6 +1656,11 @@ pub fn resolve_urls(urls: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// Creates vector of strings, Vec<String>
+  macro_rules! svec {
+    ($($x:expr),*) => (vec![$($x.to_string()),*]);
+}
 
   #[test]
   fn global_flags() {
@@ -1752,7 +1783,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "_".to_string(),
         },
-        v8_flags: Some(svec!["--help"]),
+        v8_flags: svec!["--help"],
         ..Flags::default()
       }
     );
@@ -1769,7 +1800,7 @@ mod tests {
         subcommand: DenoSubcommand::Run {
           script: "script.ts".to_string(),
         },
-        v8_flags: Some(svec!["--expose-gc", "--gc-stats=1"]),
+        v8_flags: svec!["--expose-gc", "--gc-stats=1"],
         ..Flags::default()
       }
     );
@@ -1957,6 +1988,18 @@ mod tests {
         },
         watch: true,
         unstable: true,
+        ..Flags::default()
+      }
+    );
+  }
+
+  #[test]
+  fn language_server() {
+    let r = flags_from_vec_safe(svec!["deno", "lsp"]);
+    assert_eq!(
+      r.unwrap(),
+      Flags {
+        subcommand: DenoSubcommand::LanguageServer,
         ..Flags::default()
       }
     );
@@ -2256,7 +2299,7 @@ mod tests {
         lock_write: true,
         ca_file: Some("example.crt".to_string()),
         cached_only: true,
-        v8_flags: Some(svec!["--help", "--random-seed=1"]),
+        v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
         allow_net: true,
@@ -2340,7 +2383,7 @@ mod tests {
         lock_write: true,
         ca_file: Some("example.crt".to_string()),
         cached_only: true,
-        v8_flags: Some(svec!["--help", "--random-seed=1"]),
+        v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
         allow_net: true,
@@ -2681,7 +2724,7 @@ mod tests {
           script: "script.ts".to_string(),
         },
         seed: Some(250_u64),
-        v8_flags: Some(svec!["--random-seed=250"]),
+        v8_flags: svec!["--random-seed=250"],
         ..Flags::default()
       }
     );
@@ -2704,7 +2747,7 @@ mod tests {
           script: "script.ts".to_string(),
         },
         seed: Some(250_u64),
-        v8_flags: Some(svec!["--expose-gc", "--random-seed=250"]),
+        v8_flags: svec!["--expose-gc", "--random-seed=250"],
         ..Flags::default()
       }
     );
@@ -2756,7 +2799,7 @@ mod tests {
         lock_write: true,
         ca_file: Some("example.crt".to_string()),
         cached_only: true,
-        v8_flags: Some(svec!["--help", "--random-seed=1"]),
+        v8_flags: svec!["--help", "--random-seed=1"],
         seed: Some(1),
         inspect: Some("127.0.0.1:9229".parse().unwrap()),
         allow_net: true,
@@ -2803,7 +2846,7 @@ mod tests {
 
   #[test]
   fn completions() {
-    let r = flags_from_vec_safe(svec!["deno", "completions", "bash"]).unwrap();
+    let r = flags_from_vec_safe(svec!["deno", "completions", "zsh"]).unwrap();
 
     match r.subcommand {
       DenoSubcommand::Completions { buf } => assert!(!buf.is_empty()),
@@ -3023,7 +3066,7 @@ mod tests {
   #[test]
   fn test_with_flags() {
     #[rustfmt::skip]
-    let r = flags_from_vec_safe(svec!["deno", "test", "--unstable", "--no-run", "--filter", "- foo", "--coverage", "--allow-net", "--allow-none", "dir1/", "dir2/", "--", "arg1", "arg2"]);
+    let r = flags_from_vec_safe(svec!["deno", "test", "--unstable", "--no-run", "--filter", "- foo", "--coverage=cov", "--allow-net", "--allow-none", "dir1/", "dir2/", "--", "arg1", "arg2"]);
     assert_eq!(
       r.unwrap(),
       Flags {
@@ -3036,7 +3079,7 @@ mod tests {
           include: Some(svec!["dir1/", "dir2/"]),
         },
         unstable: true,
-        coverage: true,
+        coverage_dir: Some("cov".to_string()),
         allow_net: true,
         argv: svec!["arg1", "arg2"],
         ..Flags::default()
