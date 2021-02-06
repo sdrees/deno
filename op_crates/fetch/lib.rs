@@ -37,6 +37,7 @@ use std::cell::RefCell;
 use std::convert::From;
 use std::fs::File;
 use std::io::Read;
+use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -67,8 +68,8 @@ pub fn init(isolate: &mut JsRuntime) {
       include_str!("20_headers.js"),
     ),
     (
-      "deno:op_crates/fetch/21_blob.js",
-      include_str!("21_blob.js"),
+      "deno:op_crates/fetch/21_file.js",
+      include_str!("21_file.js"),
     ),
     (
       "deno:op_crates/fetch/26_fetch.js",
@@ -82,7 +83,7 @@ pub fn init(isolate: &mut JsRuntime) {
 
 pub trait FetchPermissions {
   fn check_net_url(&self, _url: &Url) -> Result<(), AnyError>;
-  fn check_read(&self, _p: &PathBuf) -> Result<(), AnyError>;
+  fn check_read(&self, _p: &Path) -> Result<(), AnyError>;
 }
 
 /// For use with `op_fetch` when the user does not want permissions.
@@ -93,7 +94,7 @@ impl FetchPermissions for NoFetchPermissions {
     Ok(())
   }
 
-  fn check_read(&self, _p: &PathBuf) -> Result<(), AnyError> {
+  fn check_read(&self, _p: &Path) -> Result<(), AnyError> {
     Ok(())
   }
 }
