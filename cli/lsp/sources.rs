@@ -28,16 +28,16 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 pub async fn cache(
-  specifier: ModuleSpecifier,
-  maybe_import_map: Option<ImportMap>,
+  specifier: &ModuleSpecifier,
+  maybe_import_map: &Option<ImportMap>,
 ) -> Result<(), AnyError> {
   let program_state = Arc::new(ProgramState::new(Default::default())?);
   let handler = Arc::new(Mutex::new(FetchHandler::new(
     &program_state,
     Permissions::allow_all(),
   )?));
-  let mut builder = GraphBuilder::new(handler, maybe_import_map, None);
-  builder.add(&specifier, false).await
+  let mut builder = GraphBuilder::new(handler, maybe_import_map.clone(), None);
+  builder.add(specifier, false).await
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,9 +51,6 @@ struct Metadata {
 }
 
 #[derive(Debug, Clone, Default)]
-pub struct Sources(Arc<Mutex<Inner>>);
-
-#[derive(Debug, Default)]
 struct Inner {
   http_cache: HttpCache,
   maybe_import_map: Option<ImportMap>,
@@ -62,19 +59,18 @@ struct Inner {
   remotes: HashMap<ModuleSpecifier, PathBuf>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct Sources(Arc<Mutex<Inner>>);
+
 impl Sources {
   pub fn new(location: &Path) -> Self {
     Self(Arc::new(Mutex::new(Inner::new(location))))
   }
 
-  pub fn contains(&self, specifier: &ModuleSpecifier) -> bool {
-    self.0.lock().unwrap().contains(specifier)
+  pub fn contains_key(&self, specifier: &ModuleSpecifier) -> bool {
+    self.0.lock().unwrap().contains_key(specifier)
   }
 
-  /// Provides the length of the source content, calculated in a way that should
-  /// match the behavior of JavaScript, where strings are stored effectively as
-  /// `&[u16]` and when counting "chars" we need to represent the string as a
-  /// UTF-16 string in Rust.
   pub fn get_length_utf16(&self, specifier: &ModuleSpecifier) -> Option<usize> {
     self.0.lock().unwrap().get_length_utf16(specifier)
   }
@@ -84,6 +80,13 @@ impl Sources {
     specifier: &ModuleSpecifier,
   ) -> Option<LineIndex> {
     self.0.lock().unwrap().get_line_index(specifier)
+  }
+
+  pub fn get_maybe_types(
+    &self,
+    specifier: &ModuleSpecifier,
+  ) -> Option<analysis::ResolvedDependency> {
+    self.0.lock().unwrap().get_maybe_types(specifier)
   }
 
   pub fn get_media_type(
@@ -111,6 +114,14 @@ impl Sources {
   ) -> Option<(ModuleSpecifier, MediaType)> {
     self.0.lock().unwrap().resolve_import(specifier, referrer)
   }
+
+  #[cfg(test)]
+  fn resolve_specifier(
+    &self,
+    specifier: &ModuleSpecifier,
+  ) -> Option<ModuleSpecifier> {
+    self.0.lock().unwrap().resolve_specifier(specifier)
+  }
 }
 
 impl Inner {
@@ -121,7 +132,7 @@ impl Inner {
     }
   }
 
-  fn contains(&mut self, specifier: &ModuleSpecifier) -> bool {
+  fn contains_key(&mut self, specifier: &ModuleSpecifier) -> bool {
     if let Some(specifier) = self.resolve_specifier(specifier) {
       if self.get_metadata(&specifier).is_some() {
         return true;
@@ -130,6 +141,10 @@ impl Inner {
     false
   }
 
+  /// Provides the length of the source content, calculated in a way that should
+  /// match the behavior of JavaScript, where strings are stored effectively as
+  /// `&[u16]` and when counting "chars" we need to represent the string as a
+  /// UTF-16 string in Rust.
   fn get_length_utf16(&mut self, specifier: &ModuleSpecifier) -> Option<usize> {
     let specifier = self.resolve_specifier(specifier)?;
     let metadata = self.get_metadata(&specifier)?;
@@ -145,6 +160,14 @@ impl Inner {
     Some(metadata.line_index)
   }
 
+  fn get_maybe_types(
+    &mut self,
+    specifier: &ModuleSpecifier,
+  ) -> Option<analysis::ResolvedDependency> {
+    let metadata = self.get_metadata(specifier)?;
+    metadata.maybe_types
+  }
+
   fn get_media_type(
     &mut self,
     specifier: &ModuleSpecifier,
@@ -156,12 +179,13 @@ impl Inner {
 
   fn get_metadata(&mut self, specifier: &ModuleSpecifier) -> Option<Metadata> {
     if let Some(metadata) = self.metadata.get(specifier).cloned() {
-      if let Some(current_version) = self.get_script_version(specifier) {
-        if metadata.version == current_version {
-          return Some(metadata);
-        }
+      if metadata.version == self.get_script_version(specifier)? {
+        return Some(metadata);
       }
     }
+
+    // TODO(@kitsonk) this needs to be refactored, lots of duplicate logic and
+    // is really difficult to follow.
     let version = self.get_script_version(specifier)?;
     let path = self.get_path(specifier)?;
     if let Ok(bytes) = fs::read(path) {
@@ -170,12 +194,13 @@ impl Inner {
         if let Ok(source) = get_source_from_bytes(bytes, Some(charset)) {
           let media_type = MediaType::from(specifier);
           let mut maybe_types = None;
+          let maybe_import_map = self.maybe_import_map.clone();
           let dependencies = if let Some((dependencies, mt)) =
             analysis::analyze_dependencies(
               &specifier,
               &source,
               &media_type,
-              &None,
+              &maybe_import_map,
             ) {
             maybe_types = mt;
             Some(dependencies)
@@ -212,12 +237,13 @@ impl Inner {
             } else {
               None
             };
+          let maybe_import_map = self.maybe_import_map.clone();
           let dependencies = if let Some((dependencies, mt)) =
             analysis::analyze_dependencies(
               &specifier,
               &source,
               &media_type,
-              &None,
+              &maybe_import_map,
             ) {
             if maybe_types.is_none() {
               maybe_types = mt;
@@ -287,21 +313,17 @@ impl Inner {
     &mut self,
     specifier: &ModuleSpecifier,
   ) -> Option<String> {
-    if let Some(path) = self.get_path(specifier) {
-      if let Ok(metadata) = fs::metadata(path) {
-        if let Ok(modified) = metadata.modified() {
-          return if let Ok(n) = modified.duration_since(SystemTime::UNIX_EPOCH)
-          {
-            Some(format!("{}", n.as_millis()))
-          } else {
-            Some("1".to_string())
-          };
-        } else {
-          return Some("1".to_string());
-        }
+    let path = self.get_path(specifier)?;
+    let metadata = fs::metadata(path).ok()?;
+    if let Ok(modified) = metadata.modified() {
+      if let Ok(n) = modified.duration_since(SystemTime::UNIX_EPOCH) {
+        Some(format!("{}", n.as_millis()))
+      } else {
+        Some("1".to_string())
       }
+    } else {
+      Some("1".to_string())
     }
-    None
   }
 
   fn get_text(&mut self, specifier: &ModuleSpecifier) -> Option<String> {
@@ -466,7 +488,7 @@ mod tests {
     let (sources, _) = setup();
     let specifier = ModuleSpecifier::resolve_url("foo://a/b/c.ts")
       .expect("could not create specifier");
-    let actual = sources.0.lock().unwrap().resolve_specifier(&specifier);
+    let actual = sources.resolve_specifier(&specifier);
     assert!(actual.is_none());
   }
 }
