@@ -2677,7 +2677,7 @@ console.log("finish");
   #[cfg(unix)]
   #[test]
   fn _061_permissions_request() {
-    let args = "run --unstable 061_permissions_request.ts";
+    let args = "run 061_permissions_request.ts";
     let output = "061_permissions_request.ts.out";
     let input = b"g\nd\n";
 
@@ -2687,7 +2687,7 @@ console.log("finish");
   #[cfg(unix)]
   #[test]
   fn _062_permissions_request_global() {
-    let args = "run --unstable 062_permissions_request_global.ts";
+    let args = "run 062_permissions_request_global.ts";
     let output = "062_permissions_request_global.ts.out";
     let input = b"g\n";
 
@@ -2695,13 +2695,12 @@ console.log("finish");
   }
 
   itest!(_063_permissions_revoke {
-    args: "run --unstable --allow-read=foo,bar 063_permissions_revoke.ts",
+    args: "run --allow-read=foo,bar 063_permissions_revoke.ts",
     output: "063_permissions_revoke.ts.out",
   });
 
   itest!(_064_permissions_revoke_global {
-    args:
-      "run --unstable --allow-read=foo,bar 064_permissions_revoke_global.ts",
+    args: "run --allow-read=foo,bar 064_permissions_revoke_global.ts",
     output: "064_permissions_revoke_global.ts.out",
   });
 
@@ -3670,20 +3669,10 @@ console.log("finish");
     exit_code: 0,
   });
 
-  itest!(deno_doc_builtin {
-    args: "doc",
-    output: "deno_doc_builtin.out",
-  });
-
-  itest!(deno_doc {
-    args: "doc deno_doc.ts",
-    output: "deno_doc.out",
-  });
-
-  itest!(deno_doc_import_map {
-    args:
-      "doc --unstable --import-map=doc/import_map.json doc/use_import_map.js",
-    output: "doc/use_import_map.out",
+  itest!(deno_doc_types_header_direct {
+    args: "doc --reload http://127.0.0.1:4545/xTypeScriptTypes.js",
+    output: "doc/types_header.out",
+    http_server: true,
   });
 
   itest!(import_data_url_error_stack {
@@ -3944,6 +3933,42 @@ console.log("finish");
       .trim()
       .ends_with("Hello"));
     assert_eq!(output.stderr, b"");
+  }
+
+  mod doc {
+    use super::*;
+
+    itest!(deno_doc_builtin {
+      args: "doc",
+      output: "deno_doc_builtin.out",
+    });
+
+    itest!(deno_doc {
+      args: "doc deno_doc.ts",
+      output: "deno_doc.out",
+    });
+
+    itest!(deno_doc_import_map {
+      args:
+        "doc --unstable --import-map=doc/import_map.json doc/use_import_map.js",
+      output: "doc/use_import_map.out",
+    });
+
+    itest!(deno_doc_types_hint {
+      args: "doc doc/types_hint.ts",
+      output: "doc/types_hint.out",
+    });
+
+    itest!(deno_doc_types_ref {
+      args: "doc doc/types_ref.js",
+      output: "doc/types_ref.out",
+    });
+
+    itest!(deno_doc_types_header {
+      args: "doc --reload doc/types_header.ts",
+      output: "doc/types_header.out",
+      http_server: true,
+    });
   }
 
   mod coverage {
