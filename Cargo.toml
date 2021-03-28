@@ -5,11 +5,16 @@ members = [
   "cli",
   "core",
   "runtime",
+  "serde_v8",
   "test_plugin",
   "test_util",
+  "op_crates/crypto",
   "op_crates/fetch",
+  "op_crates/url",
   "op_crates/web",
-  "op_crates/crypto"
+  "op_crates/webgpu",
+  "op_crates/webidl",
+  "op_crates/websocket",
 ]
 exclude = [
   "std/hash/_wasm"

@@ -31,6 +31,7 @@ use futures::stream::StreamExt;
 use futures::stream::StreamFuture;
 use futures::task::AtomicWaker;
 use futures::Future;
+use log::debug;
 use std::any::Any;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -200,12 +201,10 @@ impl JsRuntime {
     static DENO_INIT: Once = Once::new();
     DENO_INIT.call_once(|| {
       // Include 10MB ICU data file.
-      assert!(v8::icu::set_common_data(align_data::include_aligned!(
-        align_data::Align16,
-        "icudtl.dat"
-      ))
-      .is_ok());
-
+      #[repr(C, align(16))]
+      struct IcuData([u8; 10413584]);
+      static ICU_DATA: IcuData = IcuData(*include_bytes!("icudtl.dat"));
+      v8::icu::set_common_data(&ICU_DATA.0).unwrap();
       unsafe { v8_init() };
     });
 
@@ -683,7 +682,7 @@ impl JsRuntime {
     let source_str = v8::String::new(scope, source).unwrap();
 
     let origin = bindings::module_origin(scope, name_str);
-    let source = v8::script_compiler::Source::new(source_str, &origin);
+    let source = v8::script_compiler::Source::new(source_str, Some(&origin));
 
     let tc_scope = &mut v8::TryCatch::new(scope);
 

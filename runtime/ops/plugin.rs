@@ -1,11 +1,9 @@
 // Copyright 2018-2021 the Deno authors. All rights reserved. MIT license.
-
 use crate::metrics::metrics_op;
 use crate::permissions::Permissions;
 use deno_core::error::AnyError;
 use deno_core::futures::prelude::*;
 use deno_core::plugin_api;
-use deno_core::serde_json;
 use deno_core::serde_json::json;
 use deno_core::serde_json::Value;
 use deno_core::BufVec;
@@ -17,6 +15,7 @@ use deno_core::OpState;
 use deno_core::Resource;
 use deno_core::ZeroCopyBuf;
 use dlopen::symbor::Library;
+use log::debug;
 use serde::Deserialize;
 use std::borrow::Cow;
 use std::cell::RefCell;
@@ -32,21 +31,20 @@ pub fn init(rt: &mut JsRuntime) {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct OpenPluginArgs {
+pub struct OpenPluginArgs {
   filename: String,
 }
 
 pub fn op_open_plugin(
   state: &mut OpState,
-  args: Value,
+  args: OpenPluginArgs,
   _zero_copy: &mut [ZeroCopyBuf],
 ) -> Result<Value, AnyError> {
-  let args: OpenPluginArgs = serde_json::from_value(args)?;
   let filename = PathBuf::from(&args.filename);
 
   super::check_unstable(state, "Deno.openPlugin");
   let permissions = state.borrow::<Permissions>();
-  permissions.check_plugin(&filename)?;
+  permissions.plugin.check()?;
 
   debug!("Loading Plugin: {:#?}", filename);
   let plugin_lib = Library::open(filename).map(Rc::new)?;

@@ -117,14 +117,16 @@ impl Metadata {
     media_type: &MediaType,
     maybe_import_map: &Option<ImportMap>,
   ) -> Self {
-    let (dependencies, maybe_types) = if let Some((dependencies, maybe_types)) =
-      analysis::analyze_dependencies(
+    let (dependencies, maybe_types) = if let Ok(parsed_module) =
+      analysis::parse_module(specifier, source, media_type)
+    {
+      let (deps, maybe_types) = analysis::analyze_dependencies(
         specifier,
-        source,
         media_type,
+        &parsed_module,
         maybe_import_map,
-      ) {
-      (Some(dependencies), maybe_types)
+      );
+      (Some(deps), maybe_types)
     } else {
       (None, None)
     };
@@ -161,14 +163,6 @@ impl Sources {
 
   pub fn contains_key(&self, specifier: &ModuleSpecifier) -> bool {
     self.0.lock().unwrap().contains_key(specifier)
-  }
-
-  /// Provides the length of the source content, calculated in a way that should
-  /// match the behavior of JavaScript, where strings are stored effectively as
-  /// `&[u16]` and when counting "chars" we need to represent the string as a
-  /// UTF-16 string in Rust.
-  pub fn get_length_utf16(&self, specifier: &ModuleSpecifier) -> Option<usize> {
-    self.0.lock().unwrap().get_length_utf16(specifier)
   }
 
   pub fn get_line_index(
@@ -210,6 +204,17 @@ impl Sources {
   ) -> Option<(ModuleSpecifier, MediaType)> {
     self.0.lock().unwrap().resolve_import(specifier, referrer)
   }
+
+  pub fn specifiers(&self) -> Vec<ModuleSpecifier> {
+    self
+      .0
+      .lock()
+      .unwrap()
+      .metadata
+      .iter()
+      .map(|(s, _)| s.clone())
+      .collect()
+  }
 }
 
 impl Inner {
@@ -246,13 +251,6 @@ impl Inner {
       }
     }
     false
-  }
-
-  fn get_length_utf16(&mut self, specifier: &ModuleSpecifier) -> Option<usize> {
-    let specifier =
-      resolve_specifier(specifier, &mut self.redirects, &self.http_cache)?;
-    let metadata = self.get_metadata(&specifier)?;
-    Some(metadata.length_utf16)
   }
 
   fn get_line_index(
@@ -469,19 +467,6 @@ mod tests {
     assert!(actual.is_some());
     let actual = actual.unwrap();
     assert_eq!(actual, "console.log(\"Hello World\");\n");
-  }
-
-  #[test]
-  fn test_sources_get_length_utf16() {
-    let (sources, _) = setup();
-    let c = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let tests = c.join("tests");
-    let specifier =
-      resolve_path(&tests.join("001_hello.js").to_string_lossy()).unwrap();
-    let actual = sources.get_length_utf16(&specifier);
-    assert!(actual.is_some());
-    let actual = actual.unwrap();
-    assert_eq!(actual, 28);
   }
 
   #[test]

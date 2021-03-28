@@ -15,6 +15,7 @@ use lspower::lsp::HoverProviderCapability;
 use lspower::lsp::ImplementationProviderCapability;
 use lspower::lsp::OneOf;
 use lspower::lsp::SaveOptions;
+use lspower::lsp::SelectionRangeProviderCapability;
 use lspower::lsp::ServerCapabilities;
 use lspower::lsp::SignatureHelpOptions;
 use lspower::lsp::TextDocumentSyncCapability;
@@ -55,7 +56,12 @@ pub fn server_capabilities(
     )),
     hover_provider: Some(HoverProviderCapability::Simple(true)),
     completion_provider: Some(CompletionOptions {
-      all_commit_characters: None,
+      all_commit_characters: Some(vec![
+        ".".to_string(),
+        ",".to_string(),
+        ";".to_string(),
+        "(".to_string(),
+      ]),
       trigger_characters: Some(vec![
         ".".to_string(),
         "\"".to_string(),
@@ -66,7 +72,7 @@ pub fn server_capabilities(
         "<".to_string(),
         "#".to_string(),
       ]),
-      resolve_provider: None,
+      resolve_provider: Some(true),
       work_done_progress_options: WorkDoneProgressOptions {
         work_done_progress: None,
       },
@@ -77,7 +83,7 @@ pub fn server_capabilities(
         "(".to_string(),
         "<".to_string(),
       ]),
-      retrigger_characters: None,
+      retrigger_characters: Some(vec![")".to_string()]),
       work_done_progress_options: WorkDoneProgressOptions {
         work_done_progress: None,
       },
@@ -99,7 +105,9 @@ pub fn server_capabilities(
     document_formatting_provider: Some(OneOf::Left(true)),
     document_range_formatting_provider: None,
     document_on_type_formatting_provider: None,
-    selection_range_provider: None,
+    selection_range_provider: Some(SelectionRangeProviderCapability::Simple(
+      true,
+    )),
     folding_range_provider: None,
     rename_provider: Some(OneOf::Left(true)),
     document_link_provider: None,
