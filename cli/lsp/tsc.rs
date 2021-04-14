@@ -18,7 +18,7 @@ use crate::tsc_config::TsConfig;
 use deno_core::error::anyhow;
 use deno_core::error::custom_error;
 use deno_core::error::AnyError;
-use deno_core::json_op_sync;
+use deno_core::op_sync;
 use deno_core::resolve_url;
 use deno_core::serde::de;
 use deno_core::serde::Deserialize;
@@ -1288,7 +1288,7 @@ impl OutliningSpan {
     content: &[u8],
     line_folding_only: bool,
   ) -> u32 {
-    if line_folding_only && range.end.character > 0 {
+    if line_folding_only && range.end.line > 0 && range.end.character > 0 {
       let offset_end: usize = line_index.offset(range.end).unwrap().into();
       let fold_end_char = content[offset_end - 1];
       if FOLD_END_PAIR_CHARACTERS.contains(&fold_end_char) {
@@ -1480,7 +1480,7 @@ where
   V: de::DeserializeOwned,
   R: Serialize + 'static,
 {
-  json_op_sync(move |s, args, _bufs| {
+  op_sync(move |s, args, _bufs| {
     let state = s.borrow_mut::<State>();
     op_fn(state, args)
   })

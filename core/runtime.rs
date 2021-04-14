@@ -142,24 +142,30 @@ impl Drop for JsRuntime {
   }
 }
 
-#[allow(clippy::missing_safety_doc)]
-pub unsafe fn v8_init() {
-  let platform = v8::new_default_platform().unwrap();
-  v8::V8::initialize_platform(platform);
+fn v8_init(v8_platform: Option<v8::UniquePtr<v8::Platform>>) {
+  // Include 10MB ICU data file.
+  #[repr(C, align(16))]
+  struct IcuData([u8; 10413584]);
+  static ICU_DATA: IcuData = IcuData(*include_bytes!("icudtl.dat"));
+  v8::icu::set_common_data(&ICU_DATA.0).unwrap();
+
+  let v8_platform = v8_platform
+    .unwrap_or_else(v8::new_default_platform)
+    .unwrap();
+  v8::V8::initialize_platform(v8_platform);
   v8::V8::initialize();
-  let argv = vec![
-    "".to_string(),
-    "--wasm-test-streaming".to_string(),
+
+  let flags = concat!(
     // TODO(ry) This makes WASM compile synchronously. Eventually we should
     // remove this to make it work asynchronously too. But that requires getting
     // PumpMessageLoop and RunMicrotasks setup correctly.
     // See https://github.com/denoland/deno/issues/2544
-    "--no-wasm-async-compilation".to_string(),
-    "--harmony-top-level-await".to_string(),
-    "--harmony-import-assertions".to_string(),
-    "--no-validate-asm".to_string(),
-  ];
-  v8::V8::set_flags_from_command_line(argv);
+    " --no-wasm-async-compilation",
+    " --harmony-top-level-await",
+    " --harmony-import-assertions",
+    " --no-validate-asm",
+  );
+  v8::V8::set_flags_from_string(flags);
 }
 
 #[derive(Default)]
@@ -192,20 +198,19 @@ pub struct RuntimeOptions {
 
   /// Isolate creation parameters.
   pub create_params: Option<v8::CreateParams>,
+
+  /// V8 platform instance to use. Used when Deno initializes V8
+  /// (which it only does once), otherwise it's silenty dropped.
+  pub v8_platform: Option<v8::UniquePtr<v8::Platform>>,
 }
 
 impl JsRuntime {
   /// Only constructor, configuration is done through `options`.
   pub fn new(mut options: RuntimeOptions) -> Self {
+    let v8_platform = options.v8_platform.take();
+
     static DENO_INIT: Once = Once::new();
-    DENO_INIT.call_once(|| {
-      // Include 10MB ICU data file.
-      #[repr(C, align(16))]
-      struct IcuData([u8; 10413584]);
-      static ICU_DATA: IcuData = IcuData(*include_bytes!("icudtl.dat"));
-      v8::icu::set_common_data(&ICU_DATA.0).unwrap();
-      unsafe { v8_init() };
-    });
+    DENO_INIT.call_once(move || v8_init(v8_platform));
 
     let has_startup_snapshot = options.startup_snapshot.is_some();
 
@@ -438,8 +443,8 @@ impl JsRuntime {
   ///
   /// This function provides byte-level bindings. To pass data via JSON, the
   /// following functions can be passed as an argument for `op_fn`:
-  /// * [json_op_sync()](fn.json_op_sync.html)
-  /// * [json_op_async()](fn.json_op_async.html)
+  /// * [op_sync()](fn.op_sync.html)
+  /// * [op_async()](fn.op_async.html)
   pub fn register_op<F>(&mut self, name: &str, op_fn: F) -> OpId
   where
     F: Fn(Rc<RefCell<OpState>>, OpPayload, Option<ZeroCopyBuf>) -> Op + 'static,
@@ -784,15 +789,9 @@ impl JsRuntime {
       module.get_status()
     };
 
-    // Since the same module might be dynamically imported more than once,
-    // we short-circuit is it is already evaluated.
-    if status == v8::ModuleStatus::Evaluated {
-      self.dyn_import_done(load_id, id);
-      return Ok(());
-    }
-
-    if status != v8::ModuleStatus::Instantiated {
-      return Ok(());
+    match status {
+      v8::ModuleStatus::Instantiated | v8::ModuleStatus::Evaluated => {}
+      _ => return Ok(()),
     }
 
     // IMPORTANT: Top-level-await is enabled, which means that return value
@@ -1405,11 +1404,6 @@ impl JsRuntime {
 
     let context = self.global_context();
     let scope = &mut v8::HandleScope::with_context(self.v8_isolate(), context);
-    let context = scope.get_current_context();
-    let global: v8::Local<v8::Value> = context.global(scope).into();
-    let js_recv_cb = js_recv_cb_handle.get(scope);
-
-    let tc_scope = &mut v8::TryCatch::new(scope);
 
     // We return async responses to JS in unbounded batches (may change),
     // each batch is a flat vector of tuples:
@@ -1422,18 +1416,19 @@ impl JsRuntime {
       Vec::with_capacity(2 * async_responses_size);
     for overflown_response in async_responses {
       let (promise_id, resp) = overflown_response;
-      args.push(v8::Integer::new(tc_scope, promise_id as i32).into());
+      args.push(v8::Integer::new(scope, promise_id as i32).into());
       args.push(match resp {
-        OpResponse::Value(value) => serde_v8::to_v8(tc_scope, value).unwrap(),
+        OpResponse::Value(value) => value.to_v8(scope).unwrap(),
         OpResponse::Buffer(buf) => {
-          bindings::boxed_slice_to_uint8array(tc_scope, buf).into()
+          bindings::boxed_slice_to_uint8array(scope, buf).into()
         }
       });
     }
 
-    if async_responses_size > 0 {
-      js_recv_cb.call(tc_scope, global, args.as_slice());
-    }
+    let tc_scope = &mut v8::TryCatch::new(scope);
+    let js_recv_cb = js_recv_cb_handle.get(tc_scope);
+    let this = v8::undefined(tc_scope).into();
+    js_recv_cb.call(tc_scope, this, args.as_slice());
 
     match tc_scope.exception() {
       None => Ok(()),
@@ -1450,17 +1445,15 @@ impl JsRuntime {
 
     let context = self.global_context();
     let scope = &mut v8::HandleScope::with_context(self.v8_isolate(), context);
-    let context = scope.get_current_context();
-    let global: v8::Local<v8::Value> = context.global(scope).into();
     let js_macrotask_cb = js_macrotask_cb_handle.get(scope);
 
     // Repeatedly invoke macrotask callback until it returns true (done),
     // such that ready microtasks would be automatically run before
     // next macrotask is processed.
     let tc_scope = &mut v8::TryCatch::new(scope);
-
+    let this = v8::undefined(tc_scope).into();
     loop {
-      let is_done = js_macrotask_cb.call(tc_scope, global, &[]);
+      let is_done = js_macrotask_cb.call(tc_scope, this, &[]);
 
       if let Some(exception) = tc_scope.exception() {
         return exception_to_err_result(tc_scope, exception, false);
@@ -1507,18 +1500,19 @@ pub mod tests {
   }
 
   fn dispatch(
-    op_state: Rc<RefCell<OpState>>,
+    rc_op_state: Rc<RefCell<OpState>>,
     payload: OpPayload,
     buf: Option<ZeroCopyBuf>,
   ) -> Op {
-    let op_state_ = op_state.borrow();
+    let rc_op_state2 = rc_op_state.clone();
+    let op_state_ = rc_op_state2.borrow();
     let test_state = op_state_.borrow::<TestState>();
     test_state.dispatch_count.fetch_add(1, Ordering::Relaxed);
     match test_state.mode {
       Mode::Async => {
         let control: u8 = payload.deserialize().unwrap();
         assert_eq!(control, 42);
-        let resp = OpResponse::Value(Box::new(43));
+        let resp = (0, serialize_op_result(Ok(43), rc_op_state));
         Op::Async(Box::pin(futures::future::ready(resp)))
       }
       Mode::AsyncUnref => {
@@ -1527,7 +1521,7 @@ pub mod tests {
         let fut = async {
           // This future never finish.
           futures::future::pending::<()>().await;
-          OpResponse::Value(Box::new(43))
+          (0, serialize_op_result(Ok(43), rc_op_state))
         };
         Op::AsyncUnref(Box::pin(fut))
       }
@@ -1537,8 +1531,8 @@ pub mod tests {
           assert_eq!(buf.len(), 1);
         }
 
-        let resp = OpResponse::Value(Box::new(43));
-        Op::Async(Box::pin(futures::future::ready(resp)))
+        let resp = serialize_op_result(Ok(43), rc_op_state);
+        Op::Async(Box::pin(futures::future::ready((0, resp))))
       }
     }
   }
@@ -1978,11 +1972,11 @@ pub mod tests {
     let dispatch_count = Arc::new(AtomicUsize::new(0));
     let dispatch_count_ = dispatch_count.clone();
 
-    let dispatcher = move |_state, payload: OpPayload, _buf| -> Op {
+    let dispatcher = move |state, payload: OpPayload, _buf| -> Op {
       dispatch_count_.fetch_add(1, Ordering::Relaxed);
       let control: u8 = payload.deserialize().unwrap();
       assert_eq!(control, 42);
-      let resp = OpResponse::Value(Box::new(43));
+      let resp = (0, serialize_op_result(Ok(43), state));
       Op::Async(Box::pin(futures::future::ready(resp)))
     };
 
@@ -2392,5 +2386,15 @@ main();
     let error_string = error.to_string();
     // Test that the script specifier is a URL: `deno:<repo-relative path>`.
     assert!(error_string.contains("deno:core/core.js"));
+  }
+
+  #[test]
+  fn test_v8_platform() {
+    let options = RuntimeOptions {
+      v8_platform: Some(v8::new_default_platform()),
+      ..Default::default()
+    };
+    let mut runtime = JsRuntime::new(options);
+    runtime.execute("<none>", "").unwrap();
   }
 }
