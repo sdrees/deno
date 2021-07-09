@@ -3,11 +3,22 @@ import {
   assert,
   assertEquals,
   assertThrowsAsync,
+  deferred,
   fail,
   unimplemented,
   unitTest,
 } from "./test_util.ts";
 import { Buffer } from "../../../test_util/std/io/buffer.ts";
+
+unitTest(
+  { perms: { net: true } },
+  async function fetchRequiresOneArgument(): Promise<void> {
+    await assertThrowsAsync(
+      fetch as unknown as () => Promise<void>,
+      TypeError,
+    );
+  },
+);
 
 unitTest({ perms: { net: true } }, async function fetchProtocolError(): Promise<
   void
@@ -810,7 +821,9 @@ unitTest(function responseRedirect(): void {
 unitTest(async function responseWithoutBody(): Promise<void> {
   const response = new Response();
   assertEquals(await response.arrayBuffer(), new ArrayBuffer(0));
-  assertEquals(await response.blob(), new Blob([]));
+  const blob = await response.blob();
+  assertEquals(blob.size, 0);
+  assertEquals(await blob.arrayBuffer(), new ArrayBuffer(0));
   assertEquals(await response.text(), "");
   await assertThrowsAsync(async () => {
     await response.json();
@@ -1127,5 +1140,92 @@ unitTest(
       "0\r\n\r\n",
     ].join("");
     assertEquals(actual, expected);
+  },
+);
+
+unitTest({}, function fetchWritableRespProps(): void {
+  const original = new Response("https://deno.land", {
+    status: 404,
+    headers: { "x-deno": "foo" },
+  });
+  const new_ = new Response("https://deno.land", original);
+  assertEquals(original.status, new_.status);
+  assertEquals(new_.headers.get("x-deno"), "foo");
+});
+
+function returnHostHeaderServer(addr: string): Deno.Listener {
+  const [hostname, port] = addr.split(":");
+  const listener = Deno.listen({
+    hostname,
+    port: Number(port),
+  }) as Deno.Listener;
+
+  listener.accept().then(async (conn: Deno.Conn) => {
+    const httpConn = Deno.serveHttp(conn);
+
+    await httpConn.nextRequest()
+      .then(async (requestEvent: Deno.RequestEvent | null) => {
+        const hostHeader = requestEvent?.request.headers.get("Host");
+        const headersToReturn = hostHeader ? { "Host": hostHeader } : undefined;
+
+        await requestEvent?.respondWith(
+          new Response("", {
+            status: 200,
+            headers: headersToReturn,
+          }),
+        );
+      });
+
+    httpConn.close();
+  });
+
+  return listener;
+}
+
+unitTest(
+  { perms: { net: true } },
+  async function fetchFilterOutCustomHostHeader(): Promise<
+    void
+  > {
+    const addr = "127.0.0.1:4502";
+    const listener = returnHostHeaderServer(addr);
+    const response = await fetch(`http://${addr}/`, {
+      headers: { "Host": "example.com" },
+    });
+    await response.text();
+    listener.close();
+
+    assertEquals(response.headers.get("Host"), addr);
+  },
+);
+
+unitTest(
+  { perms: { net: true } },
+  async function fetchNoServerReadableStreamBody() {
+    const done = deferred();
+    const body = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array([1]));
+        setTimeout(() => {
+          controller.enqueue(new Uint8Array([2]));
+          done.resolve();
+        }, 1000);
+      },
+    });
+    const nonExistantHostname = "http://localhost:47582";
+    await assertThrowsAsync(async () => {
+      await fetch(nonExistantHostname, { body, method: "POST" });
+    }, TypeError);
+    await done;
+  },
+);
+
+unitTest(
+  { perms: { net: true } },
+  async function fetchHeadRespBody() {
+    const res = await fetch("http://localhost:4545/echo_server", {
+      method: "HEAD",
+    });
+    assertEquals(res.body, null);
   },
 );

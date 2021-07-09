@@ -2,6 +2,7 @@
 
 use deno_core::error::bad_resource_id;
 use deno_core::error::null_opbuf;
+use deno_core::error::type_error;
 use deno_core::error::AnyError;
 use deno_core::futures::channel::oneshot;
 use deno_core::OpState;
@@ -44,7 +45,7 @@ pub struct CreateBufferArgs {
 pub fn op_webgpu_create_buffer(
   state: &mut OpState,
   args: CreateBufferArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let device_resource = state
@@ -56,19 +57,16 @@ pub fn op_webgpu_create_buffer(
   let descriptor = wgpu_core::resource::BufferDescriptor {
     label: args.label.map(Cow::from),
     size: args.size,
-    usage: wgpu_types::BufferUsage::from_bits(args.usage).unwrap(),
+    usage: wgpu_types::BufferUsage::from_bits(args.usage)
+      .ok_or_else(|| type_error("usage is not valid"))?,
     mapped_at_creation: args.mapped_at_creation.unwrap_or(false),
   };
 
-  let (buffer, maybe_err) = gfx_select!(device => instance.device_create_buffer(
+  gfx_put!(device => instance.device_create_buffer(
     device,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state.resource_table.add(WebGpuBuffer(buffer));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, WebGpuBuffer)
 }
 
 #[derive(Deserialize)]
@@ -84,7 +82,7 @@ pub struct BufferGetMapAsyncArgs {
 pub async fn op_webgpu_buffer_get_map_async(
   state: Rc<RefCell<OpState>>,
   args: BufferGetMapAsyncArgs,
-  _bufs: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let (sender, receiver) = oneshot::channel::<Result<(), AnyError>>();
 
@@ -121,7 +119,7 @@ pub async fn op_webgpu_buffer_get_map_async(
     }
 
     // TODO(lucacasonato): error handling
-    gfx_select!(buffer => instance.buffer_map_async(
+    let maybe_err = gfx_select!(buffer => instance.buffer_map_async(
       buffer,
       args.offset..(args.offset + args.size),
       wgpu_core::resource::BufferMapOperation {
@@ -133,7 +131,12 @@ pub async fn op_webgpu_buffer_get_map_async(
         callback: buffer_map_future_wrapper,
         user_data: sender_ptr,
       }
-    ))?;
+    ))
+    .err();
+
+    if maybe_err.is_some() {
+      return Ok(WebGpuResult::maybe_err(maybe_err));
+    }
   }
 
   let done = Rc::new(RefCell::new(false));
@@ -167,7 +170,7 @@ pub async fn op_webgpu_buffer_get_map_async(
 pub struct BufferGetMappedRangeArgs {
   buffer_rid: ResourceId,
   offset: u64,
-  size: u64,
+  size: Option<u64>,
 }
 
 pub fn op_webgpu_buffer_get_mapped_range(
@@ -183,21 +186,22 @@ pub fn op_webgpu_buffer_get_mapped_range(
     .ok_or_else(bad_resource_id)?;
   let buffer = buffer_resource.0;
 
-  let slice_pointer = gfx_select!(buffer => instance.buffer_get_mapped_range(
-    buffer,
-    args.offset,
-    std::num::NonZeroU64::new(args.size)
-  ))
-  .map_err(|e| DomExceptionOperationError::new(&e.to_string()))?;
+  let (slice_pointer, range_size) =
+    gfx_select!(buffer => instance.buffer_get_mapped_range(
+      buffer,
+      args.offset,
+      args.size
+    ))
+    .map_err(|e| DomExceptionOperationError::new(&e.to_string()))?;
 
   let slice = unsafe {
-    std::slice::from_raw_parts_mut(slice_pointer, args.size as usize)
+    std::slice::from_raw_parts_mut(slice_pointer, range_size as usize)
   };
   zero_copy.copy_from_slice(slice);
 
   let rid = state
     .resource_table
-    .add(WebGpuBufferMapped(slice_pointer, args.size as usize));
+    .add(WebGpuBufferMapped(slice_pointer, range_size as usize));
 
   Ok(WebGpuResult::rid(rid))
 }
@@ -233,7 +237,5 @@ pub fn op_webgpu_buffer_unmap(
     slice.copy_from_slice(&buffer);
   }
 
-  let maybe_err = gfx_select!(buffer => instance.buffer_unmap(buffer)).err();
-
-  Ok(WebGpuResult::maybe_err(maybe_err))
+  gfx_ok!(buffer => instance.buffer_unmap(buffer))
 }

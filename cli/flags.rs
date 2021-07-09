@@ -96,12 +96,14 @@ pub enum DenoSubcommand {
     script: String,
   },
   Test {
+    doc: bool,
     no_run: bool,
     fail_fast: bool,
     quiet: bool,
     allow_none: bool,
     include: Option<Vec<String>>,
     filter: Option<String>,
+    shuffle: Option<u64>,
     concurrent_jobs: usize,
   },
   Types,
@@ -790,6 +792,11 @@ TypeScript compiler cache: Subdirectory containing TS compiler output.",
     .arg(Arg::with_name("file").takes_value(true).required(false))
     .arg(reload_arg().requires("file"))
     .arg(ca_file_arg())
+    .arg(
+      location_arg()
+        .conflicts_with("file")
+        .help("Show files used for origin bound APIs like the Web Storage API when running a script with '--location=<HREF>'")
+    )
     // TODO(lucacasonato): remove for 2.0
     .arg(no_check_arg().hidden(true))
     .arg(import_map_arg())
@@ -874,9 +881,9 @@ https://deno.land/manual/getting_started/setup_your_environment#editors-and-ides
 
 fn lint_subcommand<'a, 'b>() -> App<'a, 'b> {
   SubCommand::with_name("lint")
-    .about("UNSTABLE: Lint source files")
+    .about("Lint source files")
     .long_about(
-      "UNSTABLE: Lint JavaScript/TypeScript source code.
+      "Lint JavaScript/TypeScript source code.
 
   deno lint
   deno lint myfile1.ts myfile2.js
@@ -971,7 +978,7 @@ Grant permission to read allow-listed files from disk:
 
 Deno allows specifying the filename '-' to read the file from stdin.
 
-  curl https://deno.land/std/examples/welcome.ts | target/debug/deno run -",
+  curl https://deno.land/std/examples/welcome.ts | deno run -",
     )
 }
 
@@ -982,6 +989,12 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
       Arg::with_name("no-run")
         .long("no-run")
         .help("Cache test modules, but don't run tests")
+        .takes_value(false),
+    )
+    .arg(
+      Arg::with_name("doc")
+        .long("doc")
+        .help("UNSTABLE: type check code blocks")
         .takes_value(false),
     )
     .arg(
@@ -1003,6 +1016,20 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
         .long("filter")
         .takes_value(true)
         .help("Run tests with this string or pattern in the test name"),
+    )
+    .arg(
+      Arg::with_name("shuffle")
+        .long("shuffle")
+        .value_name("NUMBER")
+        .help("(UNSTABLE): Shuffle the order in which the tests are run")
+        .min_values(0)
+        .max_values(1)
+        .require_equals(true)
+        .takes_value(true)
+        .validator(|val: String| match val.parse::<u64>() {
+          Ok(_) => Ok(()),
+          Err(_) => Err("Shuffle seed should be a number".to_string()),
+        }),
     )
     .arg(
       Arg::with_name("coverage")
@@ -1030,6 +1057,11 @@ fn test_subcommand<'a, 'b>() -> App<'a, 'b> {
         .help("List of file names to run")
         .takes_value(true)
         .multiple(true),
+    )
+    .arg(
+      watch_arg()
+        .conflicts_with("no-run")
+        .conflicts_with("coverage"),
     )
     .arg(script_arg().last(true))
     .about("Run tests")
@@ -1565,6 +1597,7 @@ fn fmt_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
 fn info_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   reload_arg_parse(flags, matches);
   import_map_arg_parse(flags, matches);
+  location_arg_parse(flags, matches);
   ca_file_arg_parse(flags, matches);
   let json = matches.is_present("json");
   flags.subcommand = DenoSubcommand::Info {
@@ -1662,10 +1695,23 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   runtime_args_parse(flags, matches, true, true);
 
   let no_run = matches.is_present("no-run");
+  let doc = matches.is_present("doc");
   let fail_fast = matches.is_present("fail-fast");
   let allow_none = matches.is_present("allow-none");
   let quiet = matches.is_present("quiet");
   let filter = matches.value_of("filter").map(String::from);
+
+  let shuffle = if matches.is_present("shuffle") {
+    let value = if let Some(value) = matches.value_of("shuffle") {
+      value.parse::<u64>().unwrap()
+    } else {
+      rand::random::<u64>()
+    };
+
+    Some(value)
+  } else {
+    None
+  };
 
   if matches.is_present("script_arg") {
     let script_arg: Vec<String> = matches
@@ -1704,10 +1750,12 @@ fn test_parse(flags: &mut Flags, matches: &clap::ArgMatches) {
   flags.coverage_dir = matches.value_of("coverage").map(String::from);
   flags.subcommand = DenoSubcommand::Test {
     no_run,
+    doc,
     fail_fast,
     quiet,
     include,
     filter,
+    shuffle,
     allow_none,
     concurrent_jobs,
   };
@@ -2275,18 +2323,6 @@ mod tests {
           ext: "ts".to_string(),
         },
         watch: true,
-        ..Flags::default()
-      }
-    );
-  }
-
-  #[test]
-  fn lsp() {
-    let r = flags_from_vec(svec!["deno", "lsp"]);
-    assert_eq!(
-      r.unwrap(),
-      Flags {
-        subcommand: DenoSubcommand::Lsp,
         ..Flags::default()
       }
     );
@@ -3350,11 +3386,13 @@ mod tests {
       Flags {
         subcommand: DenoSubcommand::Test {
           no_run: true,
+          doc: false,
           fail_fast: false,
           filter: Some("- foo".to_string()),
           allow_none: true,
           quiet: false,
           include: Some(svec!["dir1/", "dir2/"]),
+          shuffle: None,
           concurrent_jobs: 1,
         },
         unstable: true,

@@ -19,6 +19,9 @@ delete Object.prototype.__proto__;
   let logDebug = false;
   let logSource = "JS";
 
+  /** @type {string=} */
+  let cwd;
+
   // The map from the normalized specifier to the original.
   // TypeScript normalizes the specifier in its internal processing,
   // but the original specifier is needed when looking up the source from the runtime.
@@ -34,15 +37,16 @@ delete Object.prototype.__proto__;
     }
   }
 
+  function printStderr(msg) {
+    core.print(msg, true);
+  }
+
   function debug(...args) {
     if (logDebug) {
       const stringifiedArgs = args.map((arg) =>
         typeof arg === "string" ? arg : JSON.stringify(arg)
       ).join(" ");
-      // adding a non-zero integer value to the end of the debug string causes
-      // the message to be printed to stderr instead of stdout, which is better
-      // aligned to the behaviour of debug messages
-      core.print(`DEBUG ${logSource} - ${stringifiedArgs}\n`, 1);
+      printStderr(`DEBUG ${logSource} - ${stringifiedArgs}\n`);
     }
   }
 
@@ -52,7 +56,7 @@ delete Object.prototype.__proto__;
         ? String(arg)
         : JSON.stringify(arg)
     ).join(" ");
-    core.print(`ERROR ${logSource} = ${stringifiedArgs}\n`, 1);
+    printStderr(`ERROR ${logSource} = ${stringifiedArgs}\n`);
   }
 
   class AssertionError extends Error {
@@ -70,6 +74,9 @@ delete Object.prototype.__proto__;
 
   /** @type {Map<string, ts.SourceFile>} */
   const sourceFileCache = new Map();
+
+  /** @type {Map<string, string>} */
+  const scriptVersionCache = new Map();
 
   /** @param {ts.DiagnosticRelatedInformation} diagnostic */
   function fromRelatedInformation({
@@ -126,7 +133,6 @@ delete Object.prototype.__proto__;
   // analysis in Rust operates on fully resolved URLs,
   // it makes sense to use the same scheme here.
   const ASSETS = "asset:///";
-  const CACHE = "cache:///";
 
   /** Diagnostics that are intentionally ignored when compiling TypeScript in
    * Deno, as they provide misleading or incorrect information. */
@@ -145,6 +151,9 @@ delete Object.prototype.__proto__;
     // TS2306: File 'file:///Users/rld/src/deno/cli/tests/subdir/amd_like.js' is
     // not a module.
     2306,
+    // TS2688: Cannot find type definition file for '...'.
+    // We ignore because type defintion files can end with '.ts'.
+    2688,
     // TS2691: An import path cannot end with a '.ts' extension. Consider
     // importing 'bad-module' instead.
     2691,
@@ -244,9 +253,10 @@ delete Object.prototype.__proto__;
    *
    * @type {ts.CompilerHost & ts.LanguageServiceHost} */
   const host = {
-    fileExists(fileName) {
-      debug(`host.fileExists("${fileName}")`);
-      return false;
+    fileExists(specifier) {
+      debug(`host.fileExists("${specifier}")`);
+      specifier = normalizedToOriginalMap.get(specifier) ?? specifier;
+      return core.opSync("op_exists", { specifier });
     },
     readFile(specifier) {
       debug(`host.readFile("${specifier}")`);
@@ -310,7 +320,8 @@ delete Object.prototype.__proto__;
       );
     },
     getCurrentDirectory() {
-      return CACHE;
+      debug(`host.getCurrentDirectory()`);
+      return cwd ?? core.opSync("op_cwd", null);
     },
     getCanonicalFileName(fileName) {
       return fileName;
@@ -367,7 +378,15 @@ delete Object.prototype.__proto__;
       if (sourceFile) {
         return sourceFile.version ?? "1";
       }
-      return core.opSync("op_script_version", { specifier });
+      // tsc neurotically requests the script version multiple times even though
+      // it can't possibly have changed, so we will memoize it on a per request
+      // basis.
+      if (scriptVersionCache.has(specifier)) {
+        return scriptVersionCache.get(specifier);
+      }
+      const scriptVersion = core.opSync("op_script_version", { specifier });
+      scriptVersionCache.set(specifier, scriptVersion);
+      return scriptVersion;
     },
     getScriptSnapshot(specifier) {
       debug(`host.getScriptSnapshot("${specifier}")`);
@@ -385,8 +404,7 @@ delete Object.prototype.__proto__;
           },
         };
       }
-      /** @type {string | undefined} */
-      const version = core.opSync("op_script_version", { specifier });
+      const version = host.getScriptVersion(specifier);
       if (version != null) {
         return new ScriptSnapshot(specifier, version);
       }
@@ -525,6 +543,8 @@ delete Object.prototype.__proto__;
    */
   function serverRequest({ id, ...request }) {
     debug(`serverRequest()`, { id, ...request });
+    // evict all memoized source file versions
+    scriptVersionCache.clear();
     switch (request.method) {
       case "configure": {
         const { options, errors } = ts
@@ -771,12 +791,13 @@ delete Object.prototype.__proto__;
     }
   }
 
-  /** @param {{ debug: boolean; }} init */
-  function serverInit({ debug: debugFlag }) {
+  /** @param {{ debug: boolean; rootUri?: string; }} init */
+  function serverInit({ debug: debugFlag, rootUri }) {
     if (hasStarted) {
       throw new Error("The language server has already been initialized.");
     }
     hasStarted = true;
+    cwd = rootUri;
     languageService = ts.createLanguageService(host);
     setLogDebug(debugFlag, "TSLS");
     debug("serverInit()");

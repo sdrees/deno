@@ -3,7 +3,6 @@
 use deno_core::error::bad_resource_id;
 use deno_core::error::AnyError;
 use deno_core::ResourceId;
-use deno_core::ZeroCopyBuf;
 use deno_core::{OpState, Resource};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -80,7 +79,7 @@ pub struct CreateBindGroupLayoutArgs {
 pub fn op_webgpu_create_bind_group_layout(
   state: &mut OpState,
   args: CreateBindGroupLayoutArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let device_resource = state
@@ -131,7 +130,7 @@ pub fn op_webgpu_create_bind_group_layout(
               comparison: false,
             },
             "comparison" => wgpu_types::BindingType::Sampler {
-              filtering: false,
+              filtering: true,
               comparison: true,
             },
             _ => unreachable!(),
@@ -195,17 +194,11 @@ pub fn op_webgpu_create_bind_group_layout(
     entries: Cow::from(entries),
   };
 
-  let (bind_group_layout, maybe_err) = gfx_select!(device => instance.device_create_bind_group_layout(
+  gfx_put!(device => instance.device_create_bind_group_layout(
     device,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state
-    .resource_table
-    .add(WebGpuBindGroupLayout(bind_group_layout));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, WebGpuBindGroupLayout)
 }
 
 #[derive(Deserialize)]
@@ -219,7 +212,7 @@ pub struct CreatePipelineLayoutArgs {
 pub fn op_webgpu_create_pipeline_layout(
   state: &mut OpState,
   args: CreatePipelineLayoutArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let device_resource = state
@@ -244,17 +237,11 @@ pub fn op_webgpu_create_pipeline_layout(
     push_constant_ranges: Default::default(),
   };
 
-  let (pipeline_layout, maybe_err) = gfx_select!(device => instance.device_create_pipeline_layout(
+  gfx_put!(device => instance.device_create_pipeline_layout(
     device,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state
-    .resource_table
-    .add(super::pipeline::WebGpuPipelineLayout(pipeline_layout));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, super::pipeline::WebGpuPipelineLayout)
 }
 
 #[derive(Deserialize)]
@@ -279,7 +266,7 @@ pub struct CreateBindGroupArgs {
 pub fn op_webgpu_create_bind_group(
   state: &mut OpState,
   args: CreateBindGroupArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let device_resource = state
@@ -340,13 +327,9 @@ pub fn op_webgpu_create_bind_group(
     entries: Cow::from(entries),
   };
 
-  let (bind_group, maybe_err) = gfx_select!(device => instance.device_create_bind_group(
+  gfx_put!(device => instance.device_create_bind_group(
     device,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state.resource_table.add(WebGpuBindGroup(bind_group));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, WebGpuBindGroup)
 }

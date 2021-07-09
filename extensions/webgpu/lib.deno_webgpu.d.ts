@@ -15,7 +15,7 @@ declare interface GPUObjectDescriptorBase {
   label?: string;
 }
 
-declare class GPUAdapterLimits {
+declare class GPUSupportedLimits {
   maxTextureDimension1D?: number;
   maxTextureDimension2D?: number;
   maxTextureDimension3D?: number;
@@ -30,12 +30,18 @@ declare class GPUAdapterLimits {
   maxUniformBuffersPerShaderStage?: number;
   maxUniformBufferBindingSize?: number;
   maxStorageBufferBindingSize?: number;
+  minUniformBufferOffsetAlignment?: number;
+  minStorageBufferOffsetAlignment?: number;
   maxVertexBuffers?: number;
   maxVertexAttributes?: number;
   maxVertexBufferArrayStride?: number;
+  maxInterStageShaderComponents?: number;
+  maxComputeWorkgroupStorageSize?: number;
+  maxComputeWorkgroupInvocations?: number;
+  maxComputePerDimensionDispatchSize?: number;
 }
 
-declare class GPUAdapterFeatures {
+declare class GPUSupportedFeatures {
   forEach(
     callbackfn: (
       value: GPUFeatureName,
@@ -63,21 +69,23 @@ declare class GPU {
 
 declare interface GPURequestAdapterOptions {
   powerPreference?: GPUPowerPreference;
+  forceSoftware?: boolean;
 }
 
 declare type GPUPowerPreference = "low-power" | "high-performance";
 
 declare class GPUAdapter {
   readonly name: string;
-  readonly features: GPUAdapterFeatures;
-  readonly limits: GPUAdapterLimits;
+  readonly features: GPUSupportedFeatures;
+  readonly limits: GPUSupportedLimits;
+  readonly isSoftware: boolean;
 
-  requestDevice(descriptor?: GPUDeviceDescriptor): Promise<GPUDevice | null>;
+  requestDevice(descriptor?: GPUDeviceDescriptor): Promise<GPUDevice>;
 }
 
 declare interface GPUDeviceDescriptor extends GPUObjectDescriptorBase {
-  nonGuaranteedFeatures?: GPUFeatureName[];
-  nonGuaranteedLimits?: Record<string, number>;
+  requiredFeatures?: GPUFeatureName[];
+  requiredLimits?: Record<string, number>;
 }
 
 declare type GPUFeatureName =
@@ -114,7 +122,6 @@ declare class GPUDevice extends EventTarget implements GPUObjectBase {
     | ((this: GPUDevice, ev: GPUUncapturedErrorEvent) => any)
     | null;
 
-  readonly adapter: GPUAdapter;
   readonly features: ReadonlyArray<GPUFeatureName>;
   readonly limits: Record<string, number>;
   readonly queue: GPUQueue;
@@ -515,6 +522,7 @@ declare interface GPUPrimitiveState {
   stripIndexFormat?: GPUIndexFormat;
   frontFace?: GPUFrontFace;
   cullMode?: GPUCullMode;
+  clampDepth?: boolean;
 }
 
 declare type GPUFrontFace = "ccw" | "cw";
@@ -561,17 +569,17 @@ declare interface GPUBlendComponent {
 declare type GPUBlendFactor =
   | "zero"
   | "one"
-  | "src-color"
-  | "one-minus-src-color"
+  | "src"
+  | "one-minus-src"
   | "src-alpha"
   | "one-minus-src-alpha"
-  | "dst-color"
-  | "one-minus-dst-color"
+  | "dst"
+  | "one-minus-dst"
   | "dst-alpha"
   | "one-minus-dst-alpha"
   | "src-alpha-saturated"
-  | "blend-color"
-  | "one-minus-blend-color";
+  | "constant"
+  | "one-minus-constant";
 
 declare type GPUBlendOperation =
   | "add"
@@ -595,8 +603,6 @@ declare interface GPUDepthStencilState {
   depthBias?: number;
   depthBiasSlopeScale?: number;
   depthBiasClamp?: number;
-
-  clampDepth?: boolean;
 }
 
 declare interface GPUStencilFaceState {
@@ -619,37 +625,36 @@ declare type GPUStencilOperation =
 declare type GPUIndexFormat = "uint16" | "uint32";
 
 declare type GPUVertexFormat =
-  | "uchar2"
-  | "uchar4"
-  | "char2"
-  | "char4"
-  | "uchar2norm"
-  | "uchar4norm"
-  | "char2norm"
-  | "char4norm"
-  | "ushort2"
-  | "ushort4"
-  | "short2"
-  | "short4"
-  | "ushort2norm"
-  | "ushort4norm"
-  | "short2norm"
-  | "short4norm"
-  | "half2"
-  | "half4"
-  | "float"
-  | "float2"
-  | "float3"
-  | "float4"
-  | "uint"
-  | "uint2"
-  | "uint3"
-  | "uint4"
-  | "int"
-  | "int2"
-  | "int3"
-  | "int4";
-
+  | "uint8x2"
+  | "uint8x4"
+  | "sint8x2"
+  | "sint8x4"
+  | "unorm8x2"
+  | "unorm8x4"
+  | "snorm8x2"
+  | "snorm8x4"
+  | "uint16x2"
+  | "uint16x4"
+  | "sint16x2"
+  | "sint16x4"
+  | "unorm16x2"
+  | "unorm16x4"
+  | "snorm16x2"
+  | "snorm16x4"
+  | "float16x2"
+  | "float16x4"
+  | "float32"
+  | "float32x2"
+  | "float32x3"
+  | "float32x4"
+  | "uint32"
+  | "uint32x2"
+  | "uint32x3"
+  | "uint32x4"
+  | "sint32"
+  | "sint32x2"
+  | "sint32x3"
+  | "sint32x4";
 declare type GPUInputStepMode = "vertex" | "instance";
 
 declare interface GPUVertexState extends GPUProgrammableStage {
@@ -910,7 +915,7 @@ declare class GPURenderPassEncoder
     height: number,
   ): undefined;
 
-  setBlendColor(color: GPUColor): undefined;
+  setBlendConstant(color: GPUColor): undefined;
   setStencilReference(reference: number): undefined;
 
   beginOcclusionQuery(queryIndex: number): undefined;
@@ -956,7 +961,7 @@ declare interface GPURenderPassDepthStencilAttachment {
 
 declare type GPULoadOp = "load";
 
-declare type GPUStoreOp = "store" | "clear";
+declare type GPUStoreOp = "store" | "discard";
 
 declare class GPURenderBundle implements GPUObjectBase {
   label: string | null;
@@ -1118,9 +1123,9 @@ declare interface GPUOrigin3DDict {
 declare type GPUOrigin3D = number[] | GPUOrigin3DDict;
 
 declare interface GPUExtent3DDict {
-  width?: number;
+  width: number;
   height?: number;
-  depth?: number;
+  depthOrArrayLayers?: number;
 }
 
 declare type GPUExtent3D = number[] | GPUExtent3DDict;

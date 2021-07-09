@@ -2,6 +2,7 @@
 
 /// <reference no-default-lib="true" />
 /// <reference lib="deno.ns" />
+/// <reference lib="deno.net_unstable" />
 
 declare namespace Deno {
   /**
@@ -128,25 +129,6 @@ declare namespace Deno {
     speed: number | undefined;
   }
 
-  /** **UNSTABLE**: new API, yet to be vetted.
-   *
-   * Open and initialize a plugin.
-   *
-   * ```ts
-   * const rid = Deno.openPlugin("./path/to/some/plugin.so");
-   * const opId = Deno.core.ops()["some_op"];
-   * const response = Deno.core.dispatch(opId, new Uint8Array([1,2,3,4]));
-   * console.log(`Response from plugin ${response}`);
-   * ```
-   *
-   * Requires `allow-plugin` permission.
-   *
-   * The plugin system is not stable and will change in the future, hence the
-   * lack of docs. For now take a look at the example
-   * https://github.com/denoland/deno/tree/master/test_plugin
-   */
-  export function openPlugin(filename: string): number;
-
   /** The log category for a diagnostic message. */
   export enum DiagnosticCategory {
     Warning = 0,
@@ -194,12 +176,14 @@ declare namespace Deno {
   /** **UNSTABLE**: new API, yet to be vetted.
    *
    * Format an array of diagnostic items and return them as a single string in a
-   * user friendly format.
+   * user friendly format. If there are no diagnostics then it will return an
+   * empty string.
    *
    * ```ts
    * const { diagnostics } = await Deno.emit("file_with_compile_issues.ts");
    * console.table(diagnostics);  // Prints raw diagnostic data
    * console.log(Deno.formatDiagnostics(diagnostics));  // User friendly output of diagnostics
+   * console.log(Deno.formatDiagnostics([]));  // An empty string
    * ```
    *
    * @param diagnostics An array of diagnostic items to format
@@ -311,6 +295,7 @@ declare namespace Deno {
       | "umd"
       | "es6"
       | "es2015"
+      | "es2020"
       | "esnext";
     /** Do not generate custom helper functions like `__extends` in compiled
      * output. Defaults to `false`. */
@@ -407,20 +392,24 @@ declare namespace Deno {
       | "es2019"
       | "es2020"
       | "esnext";
-    /** List of names of type definitions to include. Defaults to `undefined`.
+    /** List of names of type definitions to include when type checking.
+     * Defaults to `undefined`.
      *
      * The type definitions are resolved according to the normal Deno resolution
-     * irrespective of if sources are provided on the call. Like other Deno
-     * modules, there is no "magical" resolution. For example:
+     * irrespective of if sources are provided on the call. In addition, unlike
+     * passing the `--config` option on startup, there is no base to resolve
+     * relative specifiers, so the specifiers here have to be fully qualified
+     * URLs or paths.  For example:
      *
      * ```ts
-     * Deno.compile(
-     *   "./foo.js",
-     *   undefined,
-     *   {
-     *     types: [ "./foo.d.ts", "https://deno.land/x/example/types.d.ts" ]
+     * Deno.emit("./a.ts", {
+     *   compilerOptions: {
+     *     types: [
+     *       "https://deno.land/x/pkg/types.d.ts",
+     *       "/Users/me/pkg/types.d.ts",
+     *     ]
      *   }
-     * );
+     * });
      * ```
      */
     types?: string[];
@@ -478,7 +467,10 @@ declare namespace Deno {
    * The result of `Deno.emit()` API.
    */
   export interface EmitResult {
-    /** Diagnostic messages returned from the type checker (`tsc`). */
+    /** Diagnostic messages returned from the type checker (`tsc`).
+     *
+     * Can be used with `Deno.formatDiagnostics` to display a user
+     * friendly string. */
     diagnostics: Diagnostic[];
     /** Any emitted files.  If bundled, then the JavaScript will have the
      * key of `deno:///bundle.js` with an optional map (based on
@@ -508,6 +500,10 @@ declare namespace Deno {
    *                      `deno run`. If sources are provided, it should match
    *                      one of the names of the sources.
    * @param options  A set of options to be used with the emit.
+   *
+   * @returns The result of the emit. If diagnostics are found, they can be used
+   * with `Deno.formatDiagnostics` to construct a user friendly string, which
+   * has the same format as CLI diagnostics.
    */
   export function emit(
     rootSpecifier: string | URL,
@@ -536,18 +532,19 @@ declare namespace Deno {
    * uncaught error is logged. This function can be used to perform the lookup
    * for creating better error handling.
    *
-   * **Note:** `line` and `column` are 1 indexed, which matches display
+   * **Note:** `lineNumber` and `columnNumber` are 1 indexed, which matches display
    * expectations, but is not typical of most index numbers in Deno.
    *
    * An example:
    *
    * ```ts
-   * const orig = Deno.applySourceMap({
+   * const origin = Deno.applySourceMap({
    *   fileName: "file://my/module.ts",
    *   lineNumber: 5,
    *   columnNumber: 15
    * });
-   * console.log(`${orig.filename}:${orig.line}:${orig.column}`);
+   *
+   * console.log(`${origin.fileName}:${origin.lineNumber}:${origin.columnNumber}`);
    * ```
    */
   export function applySourceMap(location: Location): Location;
@@ -742,7 +739,7 @@ declare namespace Deno {
    * is ignored. This functionality currently only works on Linux and Mac OS.
    *
    * ```ts
-   * Deno.setRaw(myTTY.rid, true, { cbreak: true });
+   * Deno.setRaw(Deno.stdin.rid, true, { cbreak: true });
    * ```
    */
   export function setRaw(
@@ -763,7 +760,7 @@ declare namespace Deno {
    *
    * Requires `allow-write` permission. */
   export function utimeSync(
-    path: string,
+    path: string | URL,
     atime: number | Date,
     mtime: number | Date,
   ): void;
@@ -780,236 +777,10 @@ declare namespace Deno {
    *
    * Requires `allow-write` permission. */
   export function utime(
-    path: string,
+    path: string | URL,
     atime: number | Date,
     mtime: number | Date,
   ): Promise<void>;
-
-  /** The type of the resource record.
-   * Only the listed types are supported currently. */
-  export type RecordType =
-    | "A"
-    | "AAAA"
-    | "ANAME"
-    | "CNAME"
-    | "MX"
-    | "PTR"
-    | "SRV"
-    | "TXT";
-
-  export interface ResolveDnsOptions {
-    /** The name server to be used for lookups.
-     * If not specified, defaults to the system configuration e.g. `/etc/resolv.conf` on Unix. */
-    nameServer?: {
-      /** The IP address of the name server */
-      ipAddr: string;
-      /** The port number the query will be sent to.
-       * If not specified, defaults to 53. */
-      port?: number;
-    };
-  }
-
-  /** If `resolveDns` is called with "MX" record type specified, it will return an array of this interface. */
-  export interface MXRecord {
-    preference: number;
-    exchange: string;
-  }
-
-  /** If `resolveDns` is called with "SRV" record type specified, it will return an array of this interface. */
-  export interface SRVRecord {
-    priority: number;
-    weight: number;
-    port: number;
-    target: string;
-  }
-
-  export function resolveDns(
-    query: string,
-    recordType: "A" | "AAAA" | "ANAME" | "CNAME" | "PTR",
-    options?: ResolveDnsOptions,
-  ): Promise<string[]>;
-
-  export function resolveDns(
-    query: string,
-    recordType: "MX",
-    options?: ResolveDnsOptions,
-  ): Promise<MXRecord[]>;
-
-  export function resolveDns(
-    query: string,
-    recordType: "SRV",
-    options?: ResolveDnsOptions,
-  ): Promise<SRVRecord[]>;
-
-  export function resolveDns(
-    query: string,
-    recordType: "TXT",
-    options?: ResolveDnsOptions,
-  ): Promise<string[][]>;
-
-  /** ** UNSTABLE**: new API, yet to be vetted.
-   *
-   * Performs DNS resolution against the given query, returning resolved records.
-   * Fails in the cases such as:
-   * - the query is in invalid format
-   * - the options have an invalid parameter, e.g. `nameServer.port` is beyond the range of 16-bit unsigned integer
-   * - timed out
-   *
-   * ```ts
-   * const a = await Deno.resolveDns("example.com", "A");
-   *
-   * const aaaa = await Deno.resolveDns("example.com", "AAAA", {
-   *   nameServer: { ipAddr: "8.8.8.8", port: 1234 },
-   * });
-   * ```
-   *
-   * Requires `allow-net` permission.
-   */
-  export function resolveDns(
-    query: string,
-    recordType: RecordType,
-    options?: ResolveDnsOptions,
-  ): Promise<string[] | MXRecord[] | SRVRecord[] | string[][]>;
-
-  /** **UNSTABLE**: new API, yet to be vetted.
-   *
-   * A generic transport listener for message-oriented protocols. */
-  export interface DatagramConn extends AsyncIterable<[Uint8Array, Addr]> {
-    /** **UNSTABLE**: new API, yet to be vetted.
-     *
-     * Waits for and resolves to the next message to the `UDPConn`. */
-    receive(p?: Uint8Array): Promise<[Uint8Array, Addr]>;
-    /** UNSTABLE: new API, yet to be vetted.
-     *
-     * Sends a message to the target. */
-    send(p: Uint8Array, addr: Addr): Promise<number>;
-    /** UNSTABLE: new API, yet to be vetted.
-     *
-     * Close closes the socket. Any pending message promises will be rejected
-     * with errors. */
-    close(): void;
-    /** Return the address of the `UDPConn`. */
-    readonly addr: Addr;
-    [Symbol.asyncIterator](): AsyncIterableIterator<[Uint8Array, Addr]>;
-  }
-
-  export interface UnixListenOptions {
-    /** A Path to the Unix Socket. */
-    path: string;
-  }
-
-  /** **UNSTABLE**: new API, yet to be vetted.
-   *
-   * Listen announces on the local transport address.
-   *
-   * ```ts
-   * const listener = Deno.listen({ path: "/foo/bar.sock", transport: "unix" })
-   * ```
-   *
-   * Requires `allow-read` and `allow-write` permission. */
-  export function listen(
-    options: UnixListenOptions & { transport: "unix" },
-  ): Listener;
-
-  /** **UNSTABLE**: new API, yet to be vetted
-   *
-   * Listen announces on the local transport address.
-   *
-   * ```ts
-   * const listener1 = Deno.listenDatagram({
-   *   port: 80,
-   *   transport: "udp"
-   * });
-   * const listener2 = Deno.listenDatagram({
-   *   hostname: "golang.org",
-   *   port: 80,
-   *   transport: "udp"
-   * });
-   * ```
-   *
-   * Requires `allow-net` permission. */
-  export function listenDatagram(
-    options: ListenOptions & { transport: "udp" },
-  ): DatagramConn;
-
-  /** **UNSTABLE**: new API, yet to be vetted
-   *
-   * Listen announces on the local transport address.
-   *
-   * ```ts
-   * const listener = Deno.listenDatagram({
-   *   address: "/foo/bar.sock",
-   *   transport: "unixpacket"
-   * });
-   * ```
-   *
-   * Requires `allow-read` and `allow-write` permission. */
-  export function listenDatagram(
-    options: UnixListenOptions & { transport: "unixpacket" },
-  ): DatagramConn;
-
-  export interface UnixConnectOptions {
-    transport: "unix";
-    path: string;
-  }
-
-  /** **UNSTABLE**:  The unix socket transport is unstable as a new API yet to
-   * be vetted.  The TCP transport is considered stable.
-   *
-   * Connects to the hostname (default is "127.0.0.1") and port on the named
-   * transport (default is "tcp"), and resolves to the connection (`Conn`).
-   *
-   * ```ts
-   * const conn1 = await Deno.connect({ port: 80 });
-   * const conn2 = await Deno.connect({ hostname: "192.0.2.1", port: 80 });
-   * const conn3 = await Deno.connect({ hostname: "[2001:db8::1]", port: 80 });
-   * const conn4 = await Deno.connect({ hostname: "golang.org", port: 80, transport: "tcp" });
-   * const conn5 = await Deno.connect({ path: "/foo/bar.sock", transport: "unix" });
-   * ```
-   *
-   * Requires `allow-net` permission for "tcp" and `allow-read` for "unix". */
-  export function connect(
-    options: ConnectOptions | UnixConnectOptions,
-  ): Promise<Conn>;
-
-  export interface StartTlsOptions {
-    /** A literal IP address or host name that can be resolved to an IP address.
-     * If not specified, defaults to `127.0.0.1`. */
-    hostname?: string;
-    /** Server certificate file. */
-    certFile?: string;
-  }
-
-  /** **UNSTABLE**: new API, yet to be vetted.
-   *
-   * Start TLS handshake from an existing connection using
-   * an optional cert file, hostname (default is "127.0.0.1").  The
-   * cert file is optional and if not included Mozilla's root certificates will
-   * be used (see also https://github.com/ctz/webpki-roots for specifics)
-   * Using this function requires that the other end of the connection is
-   * prepared for TLS handshake.
-   *
-   * ```ts
-   * const conn = await Deno.connect({ port: 80, hostname: "127.0.0.1" });
-   * const tlsConn = await Deno.startTls(conn, { certFile: "./certs/my_custom_root_CA.pem", hostname: "127.0.0.1", port: 80 });
-   * ```
-   *
-   * Requires `allow-net` permission.
-   */
-  export function startTls(
-    conn: Conn,
-    options?: StartTlsOptions,
-  ): Promise<Conn>;
-
-  export interface ListenTlsOptions {
-    /** **UNSTABLE**: new API, yet to be vetted.
-     *
-     * Application-Layer Protocol Negotiation (ALPN) protocols to announce to
-     * the client. If not specified, no ALPN extension will be included in the
-     * TLS handshake.
-     */
-    alpnProtocols?: string[];
-  }
 
   /** **UNSTABLE**: The `signo` argument may change to require the Deno.Signal
    * enum.
@@ -1043,15 +814,10 @@ declare namespace Deno {
   export function hostname(): string;
 
   /** **UNSTABLE**: New API, yet to be vetted.
-   * The pid of the current process's parent.
-   */
-  export const ppid: number;
-
-  /** **UNSTABLE**: New API, yet to be vetted.
    * A custom HttpClient for use with `fetch`.
    *
    * ```ts
-   * const client = new Deno.createHttpClient({ caFile: "./ca.pem" });
+   * const client = Deno.createHttpClient({ caData: await Deno.readTextFile("./ca.pem") });
    * const req = await fetch("https://myserver.com", { client });
    * ```
    */
@@ -1067,14 +833,30 @@ declare namespace Deno {
     /** A certificate authority to use when validating TLS certificates. Certificate data must be PEM encoded.
      */
     caData?: string;
+    proxy?: Proxy;
+  }
+
+  export interface Proxy {
+    url: string;
+    basicAuth?: BasicAuth;
+  }
+
+  export interface BasicAuth {
+    username: string;
+    password: string;
   }
 
   /** **UNSTABLE**: New API, yet to be vetted.
    * Create a custom HttpClient for to use with `fetch`.
    *
    * ```ts
-   * const client = new Deno.createHttpClient({ caFile: "./ca.pem" });
-   * const req = await fetch("https://myserver.com", { client });
+   * const client = Deno.createHttpClient({ caData: await Deno.readTextFile("./ca.pem") });
+   * const response = await fetch("https://myserver.com", { client });
+   * ```
+   *
+   * ```ts
+   * const client = Deno.createHttpClient({ proxy: { url: "http://myproxy.com:8080" } });
+   * const response = await fetch("https://myserver.com", { client });
    * ```
    */
   export function createHttpClient(
@@ -1144,44 +926,6 @@ declare namespace Deno {
     bytesReceived: number;
   }
 
-  export interface MemoryUsage {
-    rss: number;
-    heapTotal: number;
-    heapUsed: number;
-    external: number;
-  }
-
-  export function memoryUsage(): MemoryUsage;
-
-  export interface RequestEvent {
-    readonly request: Request;
-    respondWith(r: Response | Promise<Response>): Promise<void>;
-  }
-
-  export interface HttpConn extends AsyncIterable<RequestEvent> {
-    readonly rid: number;
-
-    nextRequest(): Promise<RequestEvent | null>;
-    close(): void;
-  }
-
-  /** **UNSTABLE**: new API, yet to be vetted.
-   *
-   * Services HTTP requests given a TCP or TLS socket.
-   *
-   * ```ts
-   * const httpConn = Deno.serveHttp(conn);
-   * const e = await httpConn.nextRequest();
-   * if (e) {
-   *   e.respondWith(new Response("Hello World"));
-   * }
-   * ```
-   *
-   * If `httpConn.nextRequest()` encounters an error or returns `null`
-   * then the underlying HttpConn resource is closed automatically.
-   */
-  export function serveHttp(conn: Conn): HttpConn;
-
   /** **UNSTABLE**: New option, yet to be vetted. */
   export interface TestDefinition {
     /** Specifies the permissions that should be used to run the test.
@@ -1220,7 +964,9 @@ declare namespace Deno {
       *
       * Examples:
       *
-      * ```
+      * ```ts
+      * import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+      *
       * Deno.test({
       *   name: "inherit",
       *   permissions: {
@@ -1230,10 +976,12 @@ declare namespace Deno {
       *     const status = await Deno.permissions.query({ name: "net" })
       *     assertEquals(status.state, "granted");
       *   },
-      * };
+      * });
       * ```
       *
-      * ```
+      * ```ts
+      * import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+      *
       * Deno.test({
       *   name: "true",
       *   permissions: {
@@ -1243,10 +991,12 @@ declare namespace Deno {
       *     const status = await Deno.permissions.query({ name: "net" });
       *     assertEquals(status.state, "granted");
       *   },
-      * };
+      * });
       * ```
       *
-      * ```
+      * ```ts
+      * import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+      *
       * Deno.test({
       *   name: "false",
       *   permissions: {
@@ -1256,10 +1006,12 @@ declare namespace Deno {
       *     const status = await Deno.permissions.query({ name: "net" });
       *     assertEquals(status.state, "denied");
       *   },
-      * };
+      * });
       * ```
       *
-      * ```
+      * ```ts
+      * import { assertEquals } from "https://deno.land/std/testing/asserts.ts";
+      *
       * Deno.test({
       *   name: "localhost:8080",
       *   permissions: {
@@ -1269,7 +1021,7 @@ declare namespace Deno {
       *     const status = await Deno.permissions.query({ name: "net", host: "localhost:8080" });
       *     assertEquals(status.state, "granted");
       *   },
-      * };
+      * });
       * ```
       */
       net?: "inherit" | boolean | string[];
@@ -1351,28 +1103,6 @@ declare interface WorkerOptions {
    *     },
    *   }
    * );
-   * worker.postMessage({ cmd: "readFile", fileName: "./log.txt" });
-   *
-   * // deno_worker.ts
-   *
-   *
-   * self.onmessage = async function (e) {
-   *     const { cmd, fileName } = e.data;
-   *     if (cmd !== "readFile") {
-   *         throw new Error("Invalid command");
-   *     }
-   *     const buf = await Deno.readFile(fileName);
-   *     const fileContents = new TextDecoder().decode(buf);
-   *     console.log(fileContents);
-   * }
-   *
-   * // $ cat log.txt
-   * // hello world
-   * // hello world 2
-   *
-   * // $ deno run --allow-read mod.ts
-   * // hello world
-   * // hello world2
    * ```
    */
   // TODO(Soremwar)
@@ -1387,10 +1117,8 @@ declare interface WorkerOptions {
       /** The format of the net access list must be `hostname[:port]`
        * in order to be resolved.
        *
-       * ```
-       * net: ["https://deno.land", "localhost:8080"],
-       * ```
-       * */
+       * For example: `["https://deno.land", "localhost:8080"]`.
+       */
       net?: "inherit" | boolean | string[];
       plugin?: "inherit" | boolean;
       read?: "inherit" | boolean | Array<string | URL>;

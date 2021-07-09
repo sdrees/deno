@@ -8,6 +8,7 @@ import {
   assertThrows,
 } from "../../../test_util/std/testing/asserts.ts";
 import { deferred } from "../../../test_util/std/async/deferred.ts";
+import { fromFileUrl } from "../../../test_util/std/path/mod.ts";
 
 Deno.test({
   name: "worker terminate",
@@ -160,7 +161,7 @@ Deno.test({
     const promise = deferred();
 
     const busyWorker = new Worker(
-      new URL("busy_worker.js", import.meta.url).href,
+      new URL("busy_worker.js", import.meta.url),
       { type: "module" },
     );
 
@@ -193,20 +194,17 @@ Deno.test({
     const promise = deferred();
 
     const racyWorker = new Worker(
-      new URL("racy_worker.js", import.meta.url).href,
+      new URL("racy_worker.js", import.meta.url),
       { type: "module" },
     );
 
-    racyWorker.onmessage = (e): void => {
-      assertEquals(e.data.buf.length, 999999);
-      racyWorker.onmessage = (_e): void => {
-        throw new Error("unreachable");
-      };
+    racyWorker.onmessage = (_e): void => {
       setTimeout(() => {
         promise.resolve();
       }, 100);
     };
 
+    racyWorker.postMessage("START");
     await promise;
   },
 });
@@ -221,7 +219,7 @@ Deno.test({
     const promise2 = deferred();
 
     const worker = new Worker(
-      new URL("event_worker.js", import.meta.url).href,
+      new URL("event_worker.js", import.meta.url),
       { type: "module" },
     );
 
@@ -265,7 +263,7 @@ Deno.test({
     const promise1 = deferred();
 
     const worker = new Worker(
-      new URL("event_worker_scope.js", import.meta.url).href,
+      new URL("event_worker_scope.js", import.meta.url),
       { type: "module" },
     );
 
@@ -294,11 +292,11 @@ Deno.test({
     const promise2 = deferred();
 
     const regularWorker = new Worker(
-      new URL("non_deno_worker.js", import.meta.url).href,
+      new URL("non_deno_worker.js", import.meta.url),
       { type: "module" },
     );
     const denoWorker = new Worker(
-      new URL("deno_worker.ts", import.meta.url).href,
+      new URL("deno_worker.ts", import.meta.url),
       {
         type: "module",
         deno: {
@@ -355,7 +353,7 @@ Deno.test({
     );
     const arr: number[] = [];
     w.addEventListener("message", () => arr.push(1));
-    w.onmessage = (e): void => {
+    w.onmessage = (_e): void => {
       arr.push(2);
     };
     w.addEventListener("message", () => arr.push(3));
@@ -479,8 +477,16 @@ Deno.test("Worker limit children permissions granularly", async function () {
 
   //Routes are relative to the spawned worker location
   const routes = [
-    { permission: false, route: "read_check_granular_worker.js" },
-    { permission: true, route: "read_check_worker.js" },
+    {
+      permission: false,
+      path: fromFileUrl(
+        new URL("read_check_granular_worker.js", import.meta.url),
+      ),
+    },
+    {
+      permission: true,
+      path: fromFileUrl(new URL("read_check_worker.js", import.meta.url)),
+    },
   ];
 
   let checked = 0;
@@ -493,10 +499,10 @@ Deno.test("Worker limit children permissions granularly", async function () {
     }
   };
 
-  routes.forEach(({ route }, index) =>
+  routes.forEach(({ path }, index) =>
     worker.postMessage({
       index,
-      route,
+      path,
     })
   );
 
@@ -556,12 +562,14 @@ Deno.test("Nested worker limit children permissions granularly", async function 
     {
       childHasPermission: false,
       parentHasPermission: true,
-      route: "read_check_granular_worker.js",
+      path: fromFileUrl(
+        new URL("read_check_granular_worker.js", import.meta.url),
+      ),
     },
     {
       childHasPermission: false,
       parentHasPermission: false,
-      route: "read_check_worker.js",
+      path: fromFileUrl(new URL("read_check_worker.js", import.meta.url)),
     },
   ];
 
@@ -582,10 +590,10 @@ Deno.test("Nested worker limit children permissions granularly", async function 
   };
 
   // Index needed cause requests will be handled asynchronously
-  routes.forEach(({ route }, index) =>
+  routes.forEach(({ path }, index) =>
     worker.postMessage({
       index,
-      route,
+      path,
     })
   );
 
@@ -723,6 +731,122 @@ Deno.test({
     assert(worker);
     const response = await fetch("http://localhost:4500");
     assert(await response.arrayBuffer());
+    worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "structured cloning postMessage",
+  fn: async function (): Promise<void> {
+    const result = deferred();
+    const worker = new Worker(
+      new URL("worker_structured_cloning.ts", import.meta.url).href,
+      { type: "module" },
+    );
+
+    worker.onmessage = (e): void => {
+      // self field should reference itself (circular ref)
+      const value = e.data.self.self.self;
+
+      // fields a and b refer to the same array
+      assertEquals(value.a, ["a", true, 432]);
+      assertEquals(value.a, ["a", true, 432]);
+      value.b[0] = "b";
+      value.a[2] += 5;
+      assertEquals(value.a, ["b", true, 437]);
+      assertEquals(value.b, ["b", true, 437]);
+
+      const len = value.c.size;
+      value.c.add(1); // This value is already in the set.
+      value.c.add(2);
+      assertEquals(len + 1, value.c.size);
+
+      result.resolve();
+    };
+
+    worker.postMessage("START");
+    await result;
+    worker.terminate();
+  },
+});
+
+Deno.test({
+  name: "worker with relative specifier",
+  fn: async function (): Promise<void> {
+    assertEquals(location.href, "http://127.0.0.1:4545/cli/tests/");
+    const promise = deferred();
+    const w = new Worker(
+      "./workers/test_worker.ts",
+      { type: "module", name: "tsWorker" },
+    );
+    w.onmessage = (e): void => {
+      assertEquals(e.data, "Hello, world!");
+      promise.resolve();
+    };
+    w.postMessage("Hello, world!");
+    await promise;
+    w.terminate();
+  },
+});
+
+Deno.test({
+  name: "worker SharedArrayBuffer",
+  fn: async function (): Promise<void> {
+    const promise = deferred();
+    const workerOptions: WorkerOptions = { type: "module" };
+    const w = new Worker(
+      new URL("shared_array_buffer.ts", import.meta.url).href,
+      workerOptions,
+    );
+    const sab1 = new SharedArrayBuffer(1);
+    const sab2 = new SharedArrayBuffer(1);
+    const bytes1 = new Uint8Array(sab1);
+    const bytes2 = new Uint8Array(sab2);
+    assertEquals(bytes1[0], 0);
+    assertEquals(bytes2[0], 0);
+    w.onmessage = (): void => {
+      w.postMessage([sab1, sab2]);
+      w.onmessage = (): void => {
+        assertEquals(bytes1[0], 1);
+        assertEquals(bytes2[0], 2);
+        promise.resolve();
+      };
+    };
+    await promise;
+    w.terminate();
+  },
+});
+
+Deno.test({
+  name: "Send MessagePorts from / to workers",
+  fn: async function (): Promise<void> {
+    const result = deferred();
+    const worker = new Worker(
+      new URL("message_port.ts", import.meta.url).href,
+      { type: "module" },
+    );
+
+    const channel = new MessageChannel();
+
+    worker.onmessage = (e) => {
+      assertEquals(e.data, "1");
+      assertEquals(e.ports.length, 1);
+      const port1 = e.ports[0];
+      port1.onmessage = (e) => {
+        assertEquals(e.data, true);
+        port1.close();
+        worker.postMessage("3", [channel.port1]);
+      };
+      port1.postMessage("2");
+    };
+
+    channel.port2.onmessage = (e) => {
+      assertEquals(e.data, true);
+      channel.port2.close();
+      result.resolve();
+    };
+
+    await result;
     worker.terminate();
   },
 });

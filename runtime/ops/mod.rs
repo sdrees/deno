@@ -2,18 +2,12 @@
 
 pub mod fs;
 pub mod fs_events;
-pub mod http;
 pub mod io;
-pub mod net;
-#[cfg(unix)]
-mod net_unix;
 pub mod os;
 pub mod permissions;
-pub mod plugin;
 pub mod process;
 pub mod runtime;
 pub mod signal;
-pub mod tls;
 pub mod tty;
 mod utils;
 pub mod web_worker;
@@ -27,25 +21,29 @@ use deno_core::serde::de::DeserializeOwned;
 use deno_core::serde::Serialize;
 use deno_core::JsRuntime;
 use deno_core::OpState;
-use deno_core::ZeroCopyBuf;
 use std::cell::RefCell;
 use std::future::Future;
 use std::rc::Rc;
 
-pub fn reg_async<F, V, R, RV>(rt: &mut JsRuntime, name: &'static str, op_fn: F)
-where
-  F: Fn(Rc<RefCell<OpState>>, V, Option<ZeroCopyBuf>) -> R + 'static,
-  V: DeserializeOwned,
+pub fn reg_async<F, A, B, R, RV>(
+  rt: &mut JsRuntime,
+  name: &'static str,
+  op_fn: F,
+) where
+  F: Fn(Rc<RefCell<OpState>>, A, B) -> R + 'static,
+  A: DeserializeOwned,
+  B: DeserializeOwned,
   R: Future<Output = Result<RV, AnyError>> + 'static,
   RV: Serialize + 'static,
 {
   rt.register_op(name, metrics_op(name, op_async(op_fn)));
 }
 
-pub fn reg_sync<F, V, R>(rt: &mut JsRuntime, name: &'static str, op_fn: F)
+pub fn reg_sync<F, A, B, R>(rt: &mut JsRuntime, name: &'static str, op_fn: F)
 where
-  F: Fn(&mut OpState, V, Option<ZeroCopyBuf>) -> Result<R, AnyError> + 'static,
-  V: DeserializeOwned,
+  F: Fn(&mut OpState, A, B) -> Result<R, AnyError> + 'static,
+  A: DeserializeOwned,
+  B: DeserializeOwned,
   R: Serialize + 'static,
 {
   rt.register_op(name, metrics_op(name, op_sync(op_fn)));

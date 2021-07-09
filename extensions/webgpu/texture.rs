@@ -3,7 +3,6 @@
 use deno_core::error::AnyError;
 use deno_core::error::{bad_resource_id, not_supported};
 use deno_core::ResourceId;
-use deno_core::ZeroCopyBuf;
 use deno_core::{OpState, Resource};
 use serde::Deserialize;
 use std::borrow::Cow;
@@ -126,7 +125,7 @@ pub fn serialize_dimension(
 pub struct GpuExtent3D {
   pub width: Option<u32>,
   pub height: Option<u32>,
-  pub depth: Option<u32>,
+  pub depth_or_array_layers: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -145,7 +144,7 @@ pub struct CreateTextureArgs {
 pub fn op_webgpu_create_texture(
   state: &mut OpState,
   args: CreateTextureArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let device_resource = state
@@ -159,7 +158,7 @@ pub fn op_webgpu_create_texture(
     size: wgpu_types::Extent3d {
       width: args.size.width.unwrap_or(1),
       height: args.size.height.unwrap_or(1),
-      depth: args.size.depth.unwrap_or(1),
+      depth_or_array_layers: args.size.depth_or_array_layers.unwrap_or(1),
     },
     mip_level_count: args.mip_level_count.unwrap_or(1),
     sample_count: args.sample_count.unwrap_or(1),
@@ -176,15 +175,11 @@ pub fn op_webgpu_create_texture(
     usage: wgpu_types::TextureUsage::from_bits(args.usage).unwrap(),
   };
 
-  let (texture, maybe_err) = gfx_select!(device => instance.device_create_texture(
+  gfx_put!(device => instance.device_create_texture(
     device,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state.resource_table.add(WebGpuTexture(texture));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, WebGpuTexture)
 }
 
 #[derive(Deserialize)]
@@ -204,7 +199,7 @@ pub struct CreateTextureViewArgs {
 pub fn op_webgpu_create_texture_view(
   state: &mut OpState,
   args: CreateTextureViewArgs,
-  _zero_copy: Option<ZeroCopyBuf>,
+  _: (),
 ) -> Result<WebGpuResult, AnyError> {
   let instance = state.borrow::<super::Instance>();
   let texture_resource = state
@@ -220,30 +215,30 @@ pub fn op_webgpu_create_texture_view(
       .map(|s| serialize_texture_format(&s))
       .transpose()?,
     dimension: args.dimension.map(|s| serialize_dimension(&s)),
-    aspect: match args.aspect {
-      Some(aspect) => match aspect.as_str() {
-        "all" => wgpu_types::TextureAspect::All,
-        "stencil-only" => wgpu_types::TextureAspect::StencilOnly,
-        "depth-only" => wgpu_types::TextureAspect::DepthOnly,
-        _ => unreachable!(),
+    range: wgpu_types::ImageSubresourceRange {
+      aspect: match args.aspect {
+        Some(aspect) => match aspect.as_str() {
+          "all" => wgpu_types::TextureAspect::All,
+          "stencil-only" => wgpu_types::TextureAspect::StencilOnly,
+          "depth-only" => wgpu_types::TextureAspect::DepthOnly,
+          _ => unreachable!(),
+        },
+        None => wgpu_types::TextureAspect::All,
       },
-      None => wgpu_types::TextureAspect::All,
+      base_mip_level: args.base_mip_level.unwrap_or(0),
+      mip_level_count: std::num::NonZeroU32::new(
+        args.mip_level_count.unwrap_or(0),
+      ),
+      base_array_layer: args.base_array_layer.unwrap_or(0),
+      array_layer_count: std::num::NonZeroU32::new(
+        args.array_layer_count.unwrap_or(0),
+      ),
     },
-    base_mip_level: args.base_mip_level.unwrap_or(0),
-    level_count: std::num::NonZeroU32::new(args.mip_level_count.unwrap_or(0)),
-    base_array_layer: args.base_array_layer.unwrap_or(0),
-    array_layer_count: std::num::NonZeroU32::new(
-      args.array_layer_count.unwrap_or(0),
-    ),
   };
 
-  let (texture_view, maybe_err) = gfx_select!(texture => instance.texture_create_view(
+  gfx_put!(texture => instance.texture_create_view(
     texture,
     &descriptor,
     std::marker::PhantomData
-  ));
-
-  let rid = state.resource_table.add(WebGpuTextureView(texture_view));
-
-  Ok(WebGpuResult::rid_err(rid, maybe_err))
+  ) => state, WebGpuTextureView)
 }

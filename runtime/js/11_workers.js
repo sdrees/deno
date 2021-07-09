@@ -3,11 +3,23 @@
 
 ((window) => {
   const core = window.Deno.core;
+  const {
+    ArrayIsArray,
+    ArrayPrototypeMap,
+    Error,
+    Uint8Array,
+    StringPrototypeStartsWith,
+    String,
+    SymbolIterator,
+  } = window.__bootstrap.primordials;
+  const webidl = window.__bootstrap.webidl;
+  const { URL } = window.__bootstrap.url;
   const { Window } = window.__bootstrap.globalInterfaces;
   const { getLocationHref } = window.__bootstrap.location;
   const { log, pathFromURL } = window.__bootstrap.util;
   const { defineEventHandler } = window.__bootstrap.webUtil;
-  const build = window.__bootstrap.build.build;
+  const { deserializeJsMessageData, serializeJsMessageData } =
+    window.__bootstrap.messagePort;
 
   function createWorker(
     specifier,
@@ -35,28 +47,12 @@
     core.opSync("op_host_post_message", id, data);
   }
 
-  function hostGetMessage(id) {
-    return core.opAsync("op_host_get_message", id);
+  function hostRecvCtrl(id) {
+    return core.opAsync("op_host_recv_ctrl", id);
   }
 
-  const encoder = new TextEncoder();
-  const decoder = new TextDecoder();
-
-  function encodeMessage(data) {
-    const dataJson = JSON.stringify(data);
-    return encoder.encode(dataJson);
-  }
-
-  function decodeMessage(dataIntArray) {
-    // Temporary solution until structured clone arrives in v8.
-    // Current clone is made by parsing json to byte array and from byte array back to json.
-    // In that case "undefined" transforms to empty byte array, but empty byte array does not transform back to undefined.
-    // Thats why this special is statement is needed.
-    if (dataIntArray.length == 0) {
-      return undefined;
-    }
-    const dataJson = decoder.decode(dataIntArray);
-    return JSON.parse(dataJson);
+  function hostRecvMessage(id) {
+    return core.opAsync("op_host_recv_message", id);
   }
 
   /**
@@ -89,13 +85,13 @@
           `Expected 'array' or 'boolean' for ${permission} permission, "${value}" received`,
         );
       }
-    } else if (!Array.isArray(value) && typeof value !== "boolean") {
+    } else if (!ArrayIsArray(value) && typeof value !== "boolean") {
       throw new Error(
         `Expected 'array' or 'boolean' for ${permission} permission, ${typeof value} received`,
       );
       //Casts URLs to absolute routes
-    } else if (Array.isArray(value)) {
-      value = value.map((route) => {
+    } else if (ArrayIsArray(value)) {
+      value = ArrayPrototypeMap(value, (route) => {
         if (route instanceof URL) {
           route = pathFromURL(route);
         }
@@ -185,11 +181,12 @@
 
       this.#name = name;
       const hasSourceCode = false;
-      const sourceCode = decoder.decode(new Uint8Array());
+      const sourceCode = core.decode(new Uint8Array());
 
       if (
-        specifier.startsWith("./") || specifier.startsWith("../") ||
-        specifier.startsWith("/") || type == "classic"
+        StringPrototypeStartsWith(specifier, "./") ||
+        StringPrototypeStartsWith(specifier, "../") ||
+        StringPrototypeStartsWith(specifier, "/") || type == "classic"
       ) {
         const baseUrl = getLocationHref();
         if (baseUrl != null) {
@@ -208,30 +205,10 @@
         options?.name,
       );
       this.#id = id;
-      this.#poll();
+      this.#pollControl();
+      this.#pollMessages();
     }
-
-    #handleMessage = (msgData) => {
-      let data;
-      try {
-        data = decodeMessage(new Uint8Array(msgData));
-      } catch (e) {
-        const msgErrorEvent = new MessageEvent("messageerror", {
-          cancelable: false,
-          data,
-        });
-        return;
-      }
-
-      const msgEvent = new MessageEvent("message", {
-        cancelable: false,
-        data,
-      });
-
-      this.dispatchEvent(msgEvent);
-    };
-
-    #handleError = (e) => {
+    #handleError(e) {
       const event = new ErrorEvent("error", {
         cancelable: true,
         message: e.message,
@@ -249,75 +226,97 @@
       }
 
       return handled;
-    };
+    }
 
-    #poll = async () => {
+    #pollControl = async () => {
       while (!this.#terminated) {
-        const event = await hostGetMessage(this.#id);
+        const [type, data] = await hostRecvCtrl(this.#id);
 
         // If terminate was called then we ignore all messages
         if (this.#terminated) {
           return;
         }
 
-        const type = event.type;
-
-        if (type === "terminalError") {
-          this.#terminated = true;
-          if (!this.#handleError(event.error)) {
-            if (globalThis instanceof Window) {
-              throw new Error("Unhandled error event reached main worker.");
-            } else {
-              core.opSync(
-                "op_host_unhandled_error",
-                event.error.message,
-              );
+        switch (type) {
+          case 1: { // TerminalError
+            this.#terminated = true;
+          } /* falls through */
+          case 2: { // Error
+            if (!this.#handleError(data)) {
+              if (globalThis instanceof Window) {
+                throw new Error("Unhandled error event reached main worker.");
+              } else {
+                core.opSync(
+                  "op_worker_unhandled_error",
+                  data.message,
+                );
+              }
             }
+            break;
           }
-          continue;
-        }
-
-        if (type === "msg") {
-          this.#handleMessage(event.data);
-          continue;
-        }
-
-        if (type === "error") {
-          if (!this.#handleError(event.error)) {
-            if (globalThis instanceof Window) {
-              throw new Error("Unhandled error event reached main worker.");
-            } else {
-              core.opSync(
-                "op_host_unhandled_error",
-                event.error.message,
-              );
-            }
+          case 3: { // Close
+            log(`Host got "close" message from worker: ${this.#name}`);
+            this.#terminated = true;
+            return;
           }
-          continue;
+          default: {
+            throw new Error(`Unknown worker event: "${type}"`);
+          }
         }
-
-        if (type === "close") {
-          log(`Host got "close" message from worker: ${this.#name}`);
-          this.#terminated = true;
-          return;
-        }
-
-        throw new Error(`Unknown worker event: "${type}"`);
       }
     };
 
-    postMessage(message, transferOrOptions) {
-      if (transferOrOptions) {
-        throw new Error(
-          "Not yet implemented: `transfer` and `options` are not supported.",
+    #pollMessages = async () => {
+      while (!this.terminated) {
+        const data = await hostRecvMessage(this.#id);
+        if (data === null) break;
+        let message, transfer;
+        try {
+          const v = deserializeJsMessageData(data);
+          message = v[0];
+          transfer = v[1];
+        } catch (err) {
+          const event = new MessageEvent("messageerror", {
+            cancelable: false,
+            data: err,
+          });
+          this.dispatchEvent(event);
+          return;
+        }
+        const event = new MessageEvent("message", {
+          cancelable: false,
+          data: message,
+          ports: transfer,
+        });
+        this.dispatchEvent(event);
+      }
+    };
+
+    postMessage(message, transferOrOptions = {}) {
+      const prefix = "Failed to execute 'postMessage' on 'MessagePort'";
+      webidl.requiredArguments(arguments.length, 1, { prefix });
+      message = webidl.converters.any(message);
+      let options;
+      if (
+        webidl.type(transferOrOptions) === "Object" &&
+        transferOrOptions !== undefined &&
+        transferOrOptions[SymbolIterator] !== undefined
+      ) {
+        const transfer = webidl.converters["sequence<object>"](
+          transferOrOptions,
+          { prefix, context: "Argument 2" },
         );
+        options = { transfer };
+      } else {
+        options = webidl.converters.PostMessageOptions(transferOrOptions, {
+          prefix,
+          context: "Argument 2",
+        });
       }
-
-      if (this.#terminated) {
-        return;
-      }
-
-      hostPostMessage(this.#id, encodeMessage(message));
+      const { transfer } = options;
+      const data = serializeJsMessageData(message, transfer);
+      if (this.#terminated) return;
+      hostPostMessage(this.#id, data);
     }
 
     terminate() {
